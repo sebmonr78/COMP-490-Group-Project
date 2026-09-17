@@ -1,0 +1,27 @@
+{
+  "project_name": "DELTA",
+  "project_subtitle": "Detecting Environmental Layout and Tracking Alterations",
+  "required_conda_environment": "habitat",
+  "required_python": "3.9",
+  "required_packages": {
+    "habitat-sim": "0.3.3",
+    "habitat-lab": "0.3.3",
+    "habitat-baselines": "0.3.3",
+    "habitat-hitl": "0.3.3"
+  },
+  "dataset": {
+    "environment_variable": "HABITAT_DATA_PATH",
+    "default_root": "~/habitat-data/versioned_data/hssd-hab",
+    "configuration_file": "hssd-hab-uncluttered.scene_dataset_config.json",
+    "scene_id": "103997586_171030666",
+    "scene_file": "scenes-uncluttered/103997586_171030666.scene_instance.json",
+    "semantic_file": "semantics/scenes/103997586_171030666.semantic_config.json",
+    "stage_file": "stages/103997586_171030666.glb",
+    "drone_navmesh_file": "generated_navmeshes/103997586_171030666_drone.navmesh"
+  },
+  "drone": {
+    "diameter": 0.3,
+    "max_climb": 0.08,
+    "max_slope": 45.0
+  }
+}
