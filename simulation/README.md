@@ -349,7 +349,7 @@ A window opens with two panels:
 | `I` `J` `K` `L` | look around |
 | `Z` `X` | camera height |
 | `↑` `↓` `←` `→` | drive the drone, by compass |
-| `1` | take off, hold to climb |
+| `1` | take off, hold to climb higher |
 | `0` | descend, hold to land |
 | Click the map | plan a rolling route to that spot |
 | `Enter` | follow the planned route |
@@ -361,6 +361,11 @@ A window opens with two panels:
 The camera and the drone move independently, at the same time. The drone
 marker turns blue and hollow when it is airborne, and a line inside the house
 joins it to its shadow on the floor so you can see how high it is.
+
+Neither `1` nor `0` moves the drone directly. They set the altitude it is
+aiming for, and it flies there over the next second or so, easing off as it
+arrives — so a take-off is a climb and a landing is a settle, not a jump in
+either direction.
 
 **This is the real test.** `check_setup.py` can report READY on a machine that
 still cannot draw anything. If this window opens and you can drive the drone

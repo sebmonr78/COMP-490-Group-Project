@@ -95,12 +95,44 @@ def rolls_along_the_floor(simulator, drone):
     return f"rolled {travelled:.2f} m and turned while doing it"
 
 
-def takes_off(simulator, drone):
-    assert drone.take_off(), "could not take off with a clear ceiling"
-    assert drone.flying
-    assert drone.altitude > 0.0
+FRAME = 1.0 / 60.0
 
-    return f"airborne at {drone.altitude:.2f} m"
+
+def takes_off_smoothly(simulator, drone):
+    """Take-off must be a climb, not a teleport.
+
+    The bug this guards against: take_off() used to move the sphere the whole
+    40 cm in the frame the key was pressed, so the drone appeared to jump.
+    One frame of climbing should cover a small fraction of the distance.
+    """
+    assert drone.take_off(), "could not take off with a clear ceiling"
+    assert drone.flying, "should be airborne the moment the climb starts"
+    assert drone.altitude == 0.0, "take_off moved the drone immediately"
+    assert drone.target_altitude > 0.0, "took off without aiming anywhere"
+
+    goal = drone.target_altitude
+
+    drone.update(FRAME)
+    after_one_frame = drone.altitude
+
+    assert after_one_frame > 0.0, "the drone did not rise at all"
+    assert after_one_frame < goal * 0.5, (
+        f"rose {after_one_frame:.3f} m of {goal:.2f} m in a single frame "
+        "-- that is a jump, not a climb"
+    )
+
+    frames = 1
+
+    while drone.altitude < goal - 1e-3 and frames < 600:
+        drone.update(FRAME)
+        frames += 1
+
+    assert drone.altitude > goal - 1e-3, "never reached the hover altitude"
+
+    return (
+        f"rose to {drone.altitude:.2f} m over {frames} frames "
+        f"({frames * FRAME:.2f} s), {after_one_frame * 100:.1f} cm in the first"
+    )
 
 
 def flight_is_blocked_by_the_building(simulator, drone):
@@ -133,8 +165,9 @@ def flight_is_blocked_by_the_building(simulator, drone):
 
 
 def climbing_stops_below_the_ceiling(simulator, drone):
-    for _ in range(400):
-        drone.change_altitude(0.05)
+    for _ in range(1200):
+        drone.climb(FRAME)
+        drone.update(FRAME)
 
     clearance = drone.ceiling_above()
 
@@ -153,18 +186,39 @@ def climbing_stops_below_the_ceiling(simulator, drone):
     )
 
 
-def descending_lands(simulator, drone):
-    for _ in range(600):
-        drone.change_altitude(-0.05)
+def lands_smoothly(simulator, drone):
+    """And the descent must be a descent, not a drop."""
+    from_altitude = drone.altitude
 
-        if not drone.flying:
-            break
+    drone.land()
+
+    assert drone.flying, "landing should not end the flight instantly"
+    assert drone.target_altitude == 0.0
+
+    drone.update(FRAME)
+
+    fallen = from_altitude - drone.altitude
+
+    assert fallen > 0.0, "the drone did not descend at all"
+    assert fallen < from_altitude * 0.5, (
+        f"dropped {fallen:.3f} m of {from_altitude:.2f} m in one frame "
+        "-- that is a fall, not a landing"
+    )
+
+    frames = 1
+
+    while drone.flying and frames < 2000:
+        drone.update(FRAME)
+        frames += 1
 
     assert not drone.flying, "never landed"
     assert drone.altitude == 0.0
     assert abs(drone.position.y - drone.resting_height) < 1e-6
 
-    return "came all the way down and landed"
+    return (
+        f"settled from {from_altitude:.2f} m over {frames} frames "
+        f"({frames * FRAME:.2f} s)"
+    )
 
 
 def plans_and_follows_a_rolling_route(simulator, drone):
@@ -216,10 +270,10 @@ def plans_and_follows_a_rolling_route(simulator, drone):
 TESTS = [
     starts_on_the_ground,
     rolls_along_the_floor,
-    takes_off,
+    takes_off_smoothly,
     flight_is_blocked_by_the_building,
     climbing_stops_below_the_ceiling,
-    descending_lands,
+    lands_smoothly,
     plans_and_follows_a_rolling_route,
 ]
 
