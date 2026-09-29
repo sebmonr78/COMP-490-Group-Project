@@ -59,6 +59,11 @@ from pathlib import Path
 import habitat_sim
 import magnum as mn
 import numpy as np
+
+# keep sdl off opengl,
+# prevents error where it prioritizes intel over nvidia gpu
+os.environ.setdefault("SDL_FRAMEBUFFER_ACCELERATION", "0")
+
 import pygame
 from habitat.utils.visualizations import maps
 
