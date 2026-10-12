@@ -1,0 +1,6 @@
+# Local SQLite database files
+# Each person builds their own copy by running: python create_db.py --seed
+# Do not commit these. The database gets rebuilt from schema.sql
+delta.db
+delta.db-wal
+delta.db-shm
