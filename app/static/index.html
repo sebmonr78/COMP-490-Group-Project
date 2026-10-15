@@ -16,26 +16,40 @@
     .status { padding: 2px 10px; border-radius: 10px; font-size: 0.85rem; background: #eee; color: #222; }
     .status.active { background: #d4f5dc; }
     .status.maintenance { background: #fff1c2; }
+    /* Colors for the change labels */
+    .status.moved { background: #fff1c2; }
+    .status.appeared { background: #d4f5dc; }
+    .status.disappeared { background: #fbd5d5; }
   </style>
-
 </head>
 
 <body>
-
   <h1>DELTA</h1>
-
   <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
 
   <h2>Drones</h2>
-
   <table>
     <thead><tr><th>Serial number</th><th>Status</th></tr></thead>
     <tbody id="drone-rows"></tbody>
   </table>
-
   <p id="message"></p>
 
+  <h2>What changed</h2>
+  <p id="changes-subtitle" class="subtitle"></p>
+  <table>
+    <thead><tr><th>Change</th><th>Object</th><th>Details</th><th>Position (x, y, z)</th></tr></thead>
+    <tbody id="change-rows"></tbody>
+  </table>
+  <p id="changes-message"></p>
+
   <script>
+    // Small helper: makes a table cell with some text in it
+    function makeCell(text) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      return cell;
+    }
+
     // Grabs the drone list from the backend and shows it in the table
     async function loadDrones() {
       const rows = document.getElementById("drone-rows");
@@ -58,9 +72,6 @@
         for (const drone of drones) {
           const row = document.createElement("tr");
 
-          const serial = document.createElement("td");
-          serial.textContent = drone.serial_number;
-
           // The little colored status label (active, unpaired, etc.)
           const statusCell = document.createElement("td");
           const badge = document.createElement("span");
@@ -68,7 +79,7 @@
           badge.textContent = drone.status;
           statusCell.appendChild(badge);
 
-          row.append(serial, statusCell);
+          row.append(makeCell(drone.serial_number), statusCell);
           rows.appendChild(row);
         }
       } catch (error) {
@@ -77,9 +88,71 @@
       }
     }
 
-    // Run it as soon as the page opens
-    loadDrones();
-  </script>
+    // Shows what changed in the newest scan compared to the one before it
+    async function loadChanges() {
+      const rows = document.getElementById("change-rows");
+      const message = document.getElementById("changes-message");
+      const subtitle = document.getElementById("changes-subtitle");
 
+      try {
+        // The backend sends scans newest first, so the first one is the latest
+        const sessionsResponse = await fetch("/api/sessions");
+        if (!sessionsResponse.ok) throw new Error("Server returned " + sessionsResponse.status);
+        const sessions = await sessionsResponse.json();
+
+        if (sessions.length === 0) {
+          message.textContent = "No scans yet.";
+          return;
+        }
+
+        const latest = sessions[0];
+        subtitle.textContent = "Latest scan: " + latest.started_at;
+
+        // Now ask for the changes found in that scan
+        const response = await fetch("/api/sessions/" + latest.session_id + "/changes");
+        if (!response.ok) throw new Error("Server returned " + response.status);
+        const changes = await response.json();
+
+        if (changes.length === 0) {
+          message.textContent = "Nothing changed since the last scan.";
+          return;
+        }
+
+        for (const change of changes) {
+          const row = document.createElement("tr");
+
+          // Colored label: moved / appeared / disappeared
+          const typeCell = document.createElement("td");
+          const badge = document.createElement("span");
+          badge.className = "status " + change.change_type;
+          badge.textContent = change.change_type;
+          typeCell.appendChild(badge);
+
+          // Some changes have no object name, so fall back to something readable
+          const objectName = change.label || "Unknown object";
+
+          // Position might be missing, so show "?" instead of crashing
+          const position = [change.x, change.y, change.z]
+            .map(value => (value === null ? "?" : value.toFixed(1)))
+            .join(", ");
+
+          row.append(
+            typeCell,
+            makeCell(objectName),
+            makeCell(change.description || ""),
+            makeCell(position)
+          );
+          rows.appendChild(row);
+        }
+      } catch (error) {
+        message.textContent = "Could not load changes: " + error.message;
+      }
+    }
+
+    // Run both as soon as the page opens
+    loadDrones();
+    loadChanges();
+  </script>
+  
 </body>
 </html>
