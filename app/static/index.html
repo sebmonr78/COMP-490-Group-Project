@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>DELTA</title>
+
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 0; }
+    .subtitle { color: #666; margin-top: 0.25rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { text-align: left; padding: 0.6rem; border-bottom: 1px solid #ddd; }
+    .status { padding: 2px 10px; border-radius: 10px; font-size: 0.85rem; background: #eee; color: #222; }
+    .status.active { background: #d4f5dc; }
+    .status.maintenance { background: #fff1c2; }
+  </style>
+
+</head>
+
+<body>
+
+  <h1>DELTA</h1>
+
+  <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
+
+  <h2>Drones</h2>
+
+  <table>
+    <thead><tr><th>Serial number</th><th>Status</th></tr></thead>
+    <tbody id="drone-rows"></tbody>
+  </table>
+
+  <p id="message"></p>
+
+  <script>
+    // Grabs the drone list from the backend and shows it in the table
+    async function loadDrones() {
+      const rows = document.getElementById("drone-rows");
+      const message = document.getElementById("message");
+
+      try {
+        // Ask our backend for the drones (same address we tested in the browser)
+        const response = await fetch("/api/drones");
+        if (!response.ok) throw new Error("Server returned " + response.status);
+
+        // Turn the JSON text into a list we can loop through
+        const drones = await response.json();
+
+        if (drones.length === 0) {
+          message.textContent = "No drones yet.";
+          return;
+        }
+
+        // One table row per drone
+        for (const drone of drones) {
+          const row = document.createElement("tr");
+
+          const serial = document.createElement("td");
+          serial.textContent = drone.serial_number;
+
+          // The little colored status label (active, unpaired, etc.)
+          const statusCell = document.createElement("td");
+          const badge = document.createElement("span");
+          badge.className = "status " + drone.status;
+          badge.textContent = drone.status;
+          statusCell.appendChild(badge);
+
+          row.append(serial, statusCell);
+          rows.appendChild(row);
+        }
+      } catch (error) {
+        // If the backend is down or something breaks, say so instead of showing a blank page
+        message.textContent = "Could not load drones: " + error.message;
+      }
+    }
+
+    // Run it as soon as the page opens
+    loadDrones();
+  </script>
+
+</body>
+</html>
