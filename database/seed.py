@@ -6,21 +6,25 @@ The story it tells: one user, one drone, two scans of the same room a week
 apart. Between the scans a chair was moved, a lamp was taken away and a box
 showed up, so the change-detection screens have one of each kind to display.
 
-Not for production: the password hash is a placeholder, not a real hash.
+Demo login for the login page:  demo@example.com / demo1234
+(phone 5555550100 for the email and password recovery pages).
+Not for production: the demo password is public.
 """
 
 import db
+import passwords
 
-PLACEHOLDER_HASH = "not-a-real-hash-replace-when-login-is-built"
+DEMO_PASSWORD = "demo1234"
 
 
 def seed(conn):
     """Insert the sample rows. Raises if they are already there."""
     with conn:  # one transaction: all of it or none of it
         user_id = conn.execute(
-            "INSERT INTO User (username, email, password_hash, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("demo", "demo@example.com", PLACEHOLDER_HASH, "2026-10-01 09:00:00"),
+            "INSERT INTO User (username, email, password_hash, first_name, "
+            "last_name, phone_number, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("demo", "demo@example.com", passwords.hash_password(DEMO_PASSWORD),
+             "Demo", "User", "5555550100", "2026-10-01 09:00:00"),
         ).lastrowid
 
         drone_id = conn.execute(
