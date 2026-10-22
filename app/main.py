@@ -2,6 +2,7 @@ import re
 import secrets
 import sqlite3
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -13,8 +14,20 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "database"))
 
 import db
 import passwords
+import simulations
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    # uvicorn is shutting down (Ctrl+C, --reload, terminal closed): stop any
+    # simulation it started, and its in-browser screen
+    simulations.stop_on_shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
+
+# The Run buttons for the simulation scripts (see simulations.py)
+app.include_router(simulations.router)
 
 # The folder that holds our web page (index.html)
 STATIC = Path(__file__).resolve().parent / "static"
