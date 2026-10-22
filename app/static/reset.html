@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>DELTA - Reset password</title>
+
+  <style>
+
+    body { 
+      font-family: system-ui, sans-serif;
+      max-width: 420px;
+      margin: 2rem auto;
+      padding: 0 1rem; 
+    }
+
+    h1 { 
+      margin-bottom: 0; 
+    }
+
+    .subtitle { 
+      color: #666;
+      margin-top: 0.25rem;
+    }
+
+    label { 
+      display: block; 
+      margin-top: 0.9rem; 
+      font-size: 0.9rem; 
+    }
+
+    input { 
+      display: block; 
+      width: 100%; 
+      box-sizing: border-box; 
+      margin-top: 0.3rem; 
+      padding: 0.55rem; 
+      font: inherit; 
+      border: 1px solid #bbb;
+      border-radius: 6px; 
+    }
+
+    input.bad { 
+      border-color: #c62828;
+      background: #fff5f5;
+    }
+
+    .field-error { 
+      color: #c62828;
+      font-size: 0.8rem; 
+      margin: 0.25rem 0 0; 
+    }
+
+    button { 
+      margin-top: 1.2rem;
+      padding: 0.6rem 1rem;
+      font: inherit; 
+      border: 1px solid #222;
+      border-radius: 6px; 
+      background: #222; 
+      color: #fff; 
+      cursor: pointer; 
+    }
+
+    button.secondary {
+      background: #fff; 
+      color: #222; 
+    }
+
+    button:disabled { 
+      opacity: 0.6;
+      cursor: wait; 
+    }
+
+    .links { 
+      margin-top: 1rem; 
+      display: flex; 
+      gap: 1.25rem; 
+    }
+
+    .links a { 
+      color: #1a5fb4;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+
+    .error { 
+      color: #c62828; 
+      background: #fbd5d5; 
+      padding: 0.6rem; 
+      border-radius: 6px; 
+      margin-top: 1rem; 
+    }
+
+    .box { 
+      border: 1px solid #ddd;
+      border-radius: 8px; 
+      padding: 1rem 1.25rem; 
+      margin-top: 1rem; 
+    }
+
+    .box.ok { 
+      background: #d4f5dc; 
+      border-color: #9fd8ac; 
+    }
+
+    .box.server { 
+      background: #fbd5d5;
+      border-color: #e6a3a3; 
+    }
+
+    .shown-email { 
+      font-weight: 600;
+      word-break: break-all; 
+    }
+
+    .divider { 
+      border-top: 1px solid #ddd; 
+      margin-top: 1.5rem; 
+      padding-top: 0.5rem; 
+    }
+
+    [hidden] { 
+      display: none !important; 
+    }
+
+  </style>
+</head>
+
+<body>
+  <h1>DELTA</h1>
+  <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
+
+  <!-- Step 1: type the new password -->
+  <section id="reset-form-section">
+    <h2>Choose a new password</h2>
+    <form id="reset-form" novalidate>
+      <label>New password <input id="new-password" type="password" autocomplete="new-password"></label>
+      <label>Confirm new password <input id="confirm-password" type="password" autocomplete="new-password"></label>
+      <p id="reset-error" class="error" hidden></p>
+      <button type="submit">Change password</button>
+    </form>
+  </section>
+
+  <!-- Step 2: it worked -->
+  <section id="reset-done-section" hidden>
+    <div class="box ok">
+      <h2>Password changed</h2>
+      <p>You can log in with your new password now.</p>
+    </div>
+    <a href="/"><button type="button">Back to log in</button></a>
+  </section>
+
+  <script>
+    // The reset link looks like /reset-password?token=abc123
+    // The token proves the link came from the "Forgot password" step.
+    const token = new URLSearchParams(window.location.search).get("token") || "";
+
+    function showError(text) {
+      const box = document.getElementById("reset-error");
+      box.textContent = text;
+      box.hidden = false;
+    }
+
+    document.getElementById("reset-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      document.getElementById("reset-error").hidden = true;
+
+      const password = document.getElementById("new-password").value;
+      const password_confirm = document.getElementById("confirm-password").value;
+
+      if (!password || !password_confirm) {
+        showError("Enter your new password in both boxes.");
+        return;
+      }
+
+      const button = event.target.querySelector("button[type=submit]");
+      button.disabled = true;
+
+      try {
+        const response = await fetch("/api/reset-password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, password, password_confirm }),
+        });
+
+        let data = {};
+        try { data = await response.json(); } catch { /* empty body */ }
+
+        if (response.ok) {
+          document.getElementById("reset-form-section").hidden = true;
+          document.getElementById("reset-done-section").hidden = false;
+        } else {
+          showError(typeof data.detail === "string" ? data.detail : "Something went wrong. Try again.");
+        }
+      } catch (error) {
+        showError("Could not reach the server. Is uvicorn running?");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+
+</html>
