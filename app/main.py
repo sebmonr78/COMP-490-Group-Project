@@ -2,6 +2,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -32,6 +33,11 @@ def query(sql, params=()):
 # it lives in memory, so restarting the server logs everyone out
 SESSIONS = {}
 SESSION_COOKIE = "delta_session"
+
+# reset tokens waiting to be used: token --> (user_id, expires_at)
+# in memory, like SESSIONS, so a server restart forgets them
+RESET_TOKENS = {}
+RESET_MINUTES = 15
 
 def current_user(request: Request):
     # the logged in user's id, or None if there is no valid ticket
@@ -206,9 +212,50 @@ def recover_password(info: PasswordRecoveryInfo):
     # No email server yet, so the reset link goes to the uvicorn terminal
     # instead of an inbox. Swap this print for a real email send later.
     token = secrets.token_urlsafe(32)
+    RESET_TOKENS[token] = (rows[0]["user_id"], time.time() + RESET_MINUTES * 60)
     print(f"[password reset] {email}: http://127.0.0.1:8000/reset-password?token={token}")
 
     return {"message": f"An email to reset your password was sent to {email}"}
+
+
+class ResetInfo(BaseModel):
+    token: str = ""
+    password: str = ""
+    password_confirm: str = ""
+
+
+@app.get("/reset-password")
+def reset_page():
+    return FileResponse(STATIC / "reset.html")
+
+
+@app.post("/api/reset-password")
+def reset_password(info: ResetInfo):
+    entry = RESET_TOKENS.get(info.token)
+    if entry is None or entry[1] < time.time():
+        RESET_TOKENS.pop(info.token, None)
+        raise HTTPException(status_code=400, detail="This reset link is invalid or has expired")
+    if len(info.password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
+    if info.password != info.password_confirm:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    user_id = entry[0]
+    try:
+        conn = db.connect()
+        try:
+            with conn:
+                conn.execute("UPDATE User SET password_hash = ? WHERE user_id = ?",
+                             (passwords.hash_password(info.password), user_id))
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        raise HTTPException(status_code=500, detail="Server error: could not save the new password")
+
+    del RESET_TOKENS[info.token]          # a link only works once
+    for key in [k for k, u in SESSIONS.items() if u == user_id]:
+        del SESSIONS[key]                 # log out anyone already signed in as them
+    return {"message": "Password changed"}
 
 
 @app.post("/api/register", status_code=201)
