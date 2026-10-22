@@ -88,6 +88,31 @@
     <button id="logout-button">Log out</button>
   </header>
 
+  <h2>Simulations</h2>
+  <table>
+    <thead><tr><th>Simulation</th><th></th></tr></thead>
+    <tbody id="sim-rows"></tbody>
+  </table>
+  <p id="sim-message"></p>
+
+  <div id="sim-run" hidden>
+    <div id="sim-run-header">
+      <strong id="sim-run-title"></strong>
+      <span id="sim-run-status" class="status"></span>
+      <button id="sim-stop" class="secondary">Stop</button>
+    </div>
+    <p id="sim-run-times" class="subtitle"></p>
+    <div id="sim-viewer" hidden>
+      <iframe id="sim-viewer-frame" title="Simulation window"></iframe>
+      <p id="sim-viewer-help">
+        Click inside the window first, then use the keys from the simulation README.
+        It can take a minute to appear while the house loads.
+        <a id="sim-viewer-link" target="_blank" rel="noopener">Open full size in a new tab</a>
+      </p>
+    </div>
+    <pre id="sim-output"></pre>
+  </div>
+
   <h2>Drones</h2>
   <table>
     <thead><tr><th>Serial number</th><th>Status</th></tr></thead>
