@@ -3,6 +3,7 @@ import secrets
 import sqlite3
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -22,7 +23,6 @@ async def lifespan(app):
     # uvicorn is shutting down (Ctrl+C, --reload, terminal closed): stop any
     # simulation it started, and its in-browser screen
     simulations.stop_on_shutdown()
-
 
 app = FastAPI(lifespan=lifespan)
 
