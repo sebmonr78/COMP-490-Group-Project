@@ -36,7 +36,7 @@
       padding: 0.6rem;
       border-bottom: 1px solid #ddd; 
     }
-    
+
     .status { 
       padding: 2px 10px;
       border-radius: 10px;
@@ -65,12 +65,28 @@
       background: #fbd5d5; 
     }
 
+    .top { 
+      display: flex; 
+      justify-content: space-between; 
+      align-items: flex-start; 
+    }
+
+    #logout-button { 
+      padding: 0.4rem 0.9rem; 
+      cursor: pointer; 
+    }
+
   </style>
 </head>
 
 <body>
-  <h1>DELTA</h1>
-  <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
+    <header class="top">
+    <div>
+      <h1>DELTA</h1>
+      <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
+    </div>
+    <button id="logout-button">Log out</button>
+  </header>
 
   <h2>Drones</h2>
   <table>
@@ -103,6 +119,7 @@
       try {
         // Ask our backend for the drones (same address we tested in the browser)
         const response = await fetch("/api/drones");
+        if (response.status === 401) { window.location.href = "/"; return; }  // ticket is gone --> back to login
         if (!response.ok) throw new Error("Server returned " + response.status);
 
         // Turn the JSON text into a list we can loop through
@@ -142,6 +159,7 @@
       try {
         // The backend sends scans newest first, so the first one is the latest
         const sessionsResponse = await fetch("/api/sessions");
+        if (sessionsResponse.status === 401) { window.location.href = "/"; return; }
         if (!sessionsResponse.ok) throw new Error("Server returned " + sessionsResponse.status);
         const sessions = await sessionsResponse.json();
 
@@ -193,6 +211,12 @@
         message.textContent = "Could not load changes: " + error.message;
       }
     }
+
+    // Log out: tell the server to forget our ticket, then go back to the login page
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/logout", { method: "POST" });
+      window.location.href = "/";
+    });
 
     // Run both as soon as the page opens
     loadDrones();

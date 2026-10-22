@@ -4,11 +4,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 
-# Lets the app import db.py from the database folder next to it.
+# lets the app import db.py from the database folder next to it
 sys.path.append(str(Path(__file__).resolve().parents[1] / "database"))
 
 import db
@@ -16,7 +16,7 @@ import passwords
 
 app = FastAPI()
 
-# The folder that holds our web page (index.html)
+# folder that holds our web page (index.html)
 STATIC = Path(__file__).resolve().parent / "static"
 
 
@@ -28,6 +28,19 @@ def query(sql, params=()):
     finally:
         conn.close()
 
+# who is logged in: maps a random session token to a user_id
+# it lives in memory, so restarting the server logs everyone out
+SESSIONS = {}
+SESSION_COOKIE = "delta_session"
+
+def current_user(request: Request):
+    # the logged in user's id, or None if there is no valid ticket
+    return SESSIONS.get(request.cookies.get(SESSION_COOKIE))
+
+def require_login(request: Request):
+    # used on the data endpoints: no valid ticket --> 401, no data
+    if current_user(request) is None:
+        raise HTTPException(status_code=401, detail="Log in!! These are not the drones you are looking for.")
 
 @app.get("/")
 def home():
@@ -36,9 +49,13 @@ def home():
 
 
 @app.get("/dashboard")
-def dashboard():
-    # Drones and what changed (where you land after logging in)
-    return FileResponse(STATIC / "index.html")
+def dashboard(request: Request):
+    # not logged in --> goes back to the login page
+    if current_user(request) is None:
+        return RedirectResponse("/")
+    # no-store tells the browser not to keep a copy of this page, so the Back
+    # button can't show the dashboard again after logging out
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/health")
@@ -46,12 +63,12 @@ def health():
     return {"message": "DELTA backend is running"}
 
 
-@app.get("/api/drones")
+@app.get("/api/drones", dependencies=[Depends(require_login)])
 def list_drones():
     return query("SELECT drone_id, serial_number, owner_id, status FROM Drone")
 
 
-@app.get("/api/sessions")
+@app.get("/api/sessions", dependencies=[Depends(require_login)])
 def list_sessions():
     # Newest scan first
     return query(
@@ -60,7 +77,7 @@ def list_sessions():
     )
 
 
-@app.get("/api/sessions/{session_id}/changes")
+@app.get("/api/sessions/{session_id}/changes", dependencies=[Depends(require_login)])
 def list_changes(session_id: int):
     # LEFT JOIN keeps changes that aren't tied to a specific object
     return query(
@@ -131,9 +148,8 @@ def run(sql, params=()):
 def login_page():
     return FileResponse(STATIC / "login.html")
 
-
 @app.post("/api/login")
-def login(info: LoginInfo):
+def login(info: LoginInfo, response: Response):
     # Backend DB: check if email and password are a correct pair
     rows = run(
         "SELECT user_id, first_name, password_hash FROM User WHERE email = ?",
@@ -145,8 +161,19 @@ def login(info: LoginInfo):
     if not rows or not passwords.verify_password(info.password, rows[0]["password_hash"]):
         raise HTTPException(status_code=401, detail="Email or password is wrong")
 
+    # correct login: give the browser a session ticket
+    token = secrets.token_urlsafe(32)
+    SESSIONS[token] = rows[0]["user_id"]
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax")
+
     return {"user_id": rows[0]["user_id"], "first_name": rows[0]["first_name"]}
 
+@app.post("/api/logout")
+def logout(request: Request, response: Response):
+    # Throw away the ticket on the server, then tell the browser to forget it too
+    SESSIONS.pop(request.cookies.get(SESSION_COOKIE), None)
+    response.delete_cookie(SESSION_COOKIE)
+    return {"message": "Logged out"}
 
 @app.post("/api/recover-email")
 def recover_email(info: PhoneInfo):
