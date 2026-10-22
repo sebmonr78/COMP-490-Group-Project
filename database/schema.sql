@@ -24,6 +24,9 @@ CREATE TABLE User (
     username       VARCHAR(50)  NOT NULL UNIQUE,
     email          VARCHAR(100) NOT NULL UNIQUE,
     password_hash  VARCHAR(255) NOT NULL,
+    first_name     VARCHAR(50),                          -- filled in by the registration page
+    last_name      VARCHAR(50),
+    phone_number   VARCHAR(20)  UNIQUE,                  -- digits only; used for email recovery
     created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

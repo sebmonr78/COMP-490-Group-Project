@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>DELTA - Log in</title>
+
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 420px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 0; }
+    .subtitle { color: #666; margin-top: 0.25rem; }
+    label { display: block; margin-top: 0.9rem; font-size: 0.9rem; }
+    input { display: block; width: 100%; box-sizing: border-box; margin-top: 0.3rem; padding: 0.55rem; font: inherit; border: 1px solid #bbb; border-radius: 6px; }
+    input.bad { border-color: #c62828; background: #fff5f5; }
+    .field-error { color: #c62828; font-size: 0.8rem; margin: 0.25rem 0 0; }
+    button { margin-top: 1.2rem; padding: 0.6rem 1rem; font: inherit; border: 1px solid #222; border-radius: 6px; background: #222; color: #fff; cursor: pointer; }
+    button.secondary { background: #fff; color: #222; }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    .links { margin-top: 1rem; display: flex; gap: 1.25rem; }
+    .links a { color: #1a5fb4; font-size: 0.9rem; cursor: pointer; }
+    .error { color: #c62828; background: #fbd5d5; padding: 0.6rem; border-radius: 6px; margin-top: 1rem; }
+    .box { border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.25rem; margin-top: 1rem; }
+    .box.ok { background: #d4f5dc; border-color: #9fd8ac; }
+    .box.server { background: #fbd5d5; border-color: #e6a3a3; }
+    .shown-email { font-weight: 600; word-break: break-all; }
+    .divider { border-top: 1px solid #ddd; margin-top: 1.5rem; padding-top: 0.5rem; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+
+<body>
+  <h1>DELTA</h1>
+  <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
+
+  <!-- Log-in page -->
+  <section id="login-page">
+    <h2>Log in</h2>
+    <form id="login-form" novalidate>
+      <label>Email <input id="login-email" type="email" autocomplete="email"></label>
+      <label>Password <input id="login-password" type="password" autocomplete="current-password"></label>
+      <p id="login-error" class="error" hidden></p>
+      <button type="submit">Log in</button>
+    </form>
+    <div class="links">
+      <a data-go="email-recovery-page">Forgot email?</a>
+      <a data-go="password-recovery-page">Forgot password?</a>
+    </div>
+    <div class="divider">
+      <button class="secondary" data-go="registration-page">Make a new account</button>
+    </div>
+  </section>
+
+  <!-- Email Recovery page -->
+  <section id="email-recovery-page" hidden>
+    <h2>Recover your email</h2>
+    <p class="subtitle">Enter the phone number on your account.</p>
+    <form id="email-recovery-form" novalidate>
+      <label>Phone number <input id="recover-email-phone" type="tel" autocomplete="tel"></label>
+      <p id="email-recovery-error" class="error" hidden></p>
+      <button type="submit">Enter</button>
+    </form>
+    <div class="links"><a data-go="login-page">Back to log in</a></div>
+  </section>
+
+  <!-- Password Recovery page -->
+  <section id="password-recovery-page" hidden>
+    <h2>Reset your password</h2>
+    <p class="subtitle">Enter the email and phone number on your account.</p>
+    <form id="password-recovery-form" novalidate>
+      <label>Email <input id="recover-password-email" type="email" autocomplete="email"></label>
+      <label>Phone number <input id="recover-password-phone" type="tel" autocomplete="tel"></label>
+      <p id="password-recovery-error" class="error" hidden></p>
+      <button type="submit">Enter</button>
+    </form>
+    <div class="links"><a data-go="login-page">Back to log in</a></div>
+  </section>
+
+  <!-- Email Recovery Box -->
+  <section id="email-recovery-box" hidden>
+    <div class="box ok">
+      <h2>Email found</h2>
+      <p>The email on your account is:</p>
+      <p id="found-email" class="shown-email"></p>
+    </div>
+    <button data-go="login-page">Back to log in</button>
+  </section>
+
+  <!-- Password Reset Box -->
+  <section id="password-reset-box" hidden>
+    <div class="box ok">
+      <h2>Check your email</h2>
+      <p id="reset-message"></p>
+    </div>
+    <button data-go="login-page">Back to log in</button>
+  </section>
+
+  <!-- Registration page -->
+  <section id="registration-page" hidden>
+    <h2>Make a new account</h2>
+    <form id="registration-form" novalidate>
+      <!-- Each input's name matches the field the backend expects -->
+      <label>First name <input name="first_name" autocomplete="given-name"></label>
+      <label>Last name <input name="last_name" autocomplete="family-name"></label>
+      <label>Email <input name="email" type="email" autocomplete="email"></label>
+      <label>Confirm email <input name="email_confirm" type="email" autocomplete="off"></label>
+      <label>Password <input name="password" type="password" autocomplete="new-password"></label>
+      <label>Confirm password <input name="password_confirm" type="password" autocomplete="new-password"></label>
+      <label>Phone number <input name="phone_number" type="tel" autocomplete="tel"></label>
+      <p id="registration-error" class="error" hidden></p>
+      <button type="submit">Continue</button>
+    </form>
+    <div class="links"><a data-go="login-page">Back to log in</a></div>
+  </section>
+
+  <!-- Account Made Box -->
+  <section id="account-made-box" hidden>
+    <div class="box ok">
+      <h2>Account created</h2>
+      <p>Your account was made. You can log in now.</p>
+    </div>
+    <button data-go="login-page">Log in</button>
+  </section>
+
+  <!-- Server Error Box -->
+  <section id="server-error-box" hidden>
+    <div class="box server">
+      <h2>Server error</h2>
+      <p id="server-error-message">Something went wrong on our end.</p>
+      <p id="server-error-code" class="subtitle"></p>
+    </div>
+    <button data-go="login-page">Back to log in</button>
+  </section>
+
+  <script>
+    // Every screen in the Log in State Diagram is one <section>.
+    // show() hides all of them and shows the one we want.
+    const SCREENS = [
+      "login-page", "email-recovery-page", "password-recovery-page",
+      "email-recovery-box", "password-reset-box", "registration-page",
+      "account-made-box", "server-error-box",
+    ];
+
+    const FIELD_NAMES = {
+      first_name: "First name", last_name: "Last name", email: "Email",
+      email_confirm: "Confirm email", password: "Password",
+      password_confirm: "Confirm password", phone_number: "Phone number",
+    };
+
+    function show(screenId) {
+      for (const id of SCREENS) {
+        document.getElementById(id).hidden = (id !== screenId);
+      }
+      clearErrors();
+
+      // Put the cursor in the first box so you can start typing right away
+      const firstInput = document.querySelector("#" + screenId + " input");
+      if (firstInput) firstInput.focus();
+    }
+
+    function showError(id, text) {
+      const box = document.getElementById(id);
+      box.textContent = text;
+      box.hidden = false;
+    }
+
+    function clearErrors() {
+      document.querySelectorAll(".error").forEach(box => { box.hidden = true; });
+      document.querySelectorAll(".field-error").forEach(note => note.remove());
+      document.querySelectorAll("input.bad").forEach(input => input.classList.remove("bad"));
+    }
+
+    // Any link or button with data-go="some-screen" switches to that screen
+    document.querySelectorAll("[data-go]").forEach(el => {
+      el.addEventListener("click", () => show(el.dataset.go));
+    });
+
+    // Sends JSON to the backend. Returns { ok, status, data }.
+    // A 500 or no connection at all goes straight to the Server Error Box.
+    async function send(url, body, form) {
+      const button = form.querySelector("button[type=submit]");
+      button.disabled = true;
+
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+        let data = {};
+        try { data = await response.json(); } catch { /* empty body */ }
+
+        if (response.status >= 500) {
+          serverError(response.status, data.detail);
+          return null;
+        }
+        return { ok: response.ok, status: response.status, data };
+      } catch (error) {
+        // fetch only throws when the backend can't be reached at all
+        serverError(null, "Could not reach the server. Is uvicorn running?");
+        return null;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function serverError(status, detail) {
+      show("server-error-box");
+      document.getElementById("server-error-message").textContent =
+        typeof detail === "string" ? detail : "Something went wrong on our end.";
+      document.getElementById("server-error-code").textContent =
+        status ? "Error code: " + status : "";
+    }
+
+    // ---------- Log in ----------
+    document.getElementById("login-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      clearErrors();
+
+      const email = document.getElementById("login-email").value.trim();
+      const password = document.getElementById("login-password").value;
+
+      if (!email || !password) {
+        showError("login-error", "Enter your email and password.");
+        return;
+      }
+
+      const result = await send("/api/login", { email, password }, event.target);
+      if (!result) return;
+
+      if (result.ok) {
+        // Successful login: on to the dashboard
+        window.location.href = "/";
+      } else {
+        // Email or password wrong: stay on the log-in page
+        showError("login-error", result.data.detail || "Email or password is wrong.");
+        document.getElementById("login-password").value = "";
+      }
+    });
+
+    // ---------- Forgot email ----------
+    document.getElementById("email-recovery-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      clearErrors();
+
+      const phone_number = document.getElementById("recover-email-phone").value.trim();
+      if (!phone_number) {
+        showError("email-recovery-error", "Enter your phone number.");
+        return;
+      }
+
+      const result = await send("/api/recover-email", { phone_number }, event.target);
+      if (!result) return;
+
+      if (result.ok) {
+        show("email-recovery-box");
+        document.getElementById("found-email").textContent = result.data.email;
+        event.target.reset();
+      } else {
+        // Phone number not in system
+        showError("email-recovery-error", result.data.detail || "That phone number is not in our system.");
+      }
+    });
+
+    // ---------- Forgot password ----------
+    document.getElementById("password-recovery-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      clearErrors();
+
+      const email = document.getElementById("recover-password-email").value.trim();
+      const phone_number = document.getElementById("recover-password-phone").value.trim();
+      if (!email || !phone_number) {
+        showError("password-recovery-error", "Enter your email and phone number.");
+        return;
+      }
+
+      const result = await send("/api/recover-password", { email, phone_number }, event.target);
+      if (!result) return;
+
+      if (result.ok) {
+        show("password-reset-box");
+        document.getElementById("reset-message").textContent = result.data.message;
+        event.target.reset();
+      } else {
+        // Email not in system
+        showError("password-recovery-error", result.data.detail || "That email is not in our system.");
+      }
+    });
+
+    // ---------- Registration ----------
+    function markField(form, name, text) {
+      const input = form.elements[name];
+      if (!input) return;
+      input.classList.add("bad");
+      if (text) {
+        const note = document.createElement("p");
+        note.className = "field-error";
+        note.textContent = text;
+        input.insertAdjacentElement("afterend", note);
+      }
+    }
+
+    document.getElementById("registration-form").addEventListener("submit", async event => {
+      event.preventDefault();
+      clearErrors();
+      const form = event.target;
+
+      // Grab every input by its name: { first_name: "...", last_name: "...", ... }
+      const info = {};
+      for (const input of form.querySelectorAll("input")) {
+        info[input.name] = input.value.trim();
+      }
+
+      // Not all the registration info was filled out: catch it here before
+      // bothering the backend (the backend checks again anyway).
+      const missing = Object.keys(info).filter(name => !info[name]);
+      if (missing.length > 0) {
+        missing.forEach(name => markField(form, name));
+        showError("registration-error",
+          "Please fill out: " + missing.map(name => FIELD_NAMES[name]).join(", "));
+        return;
+      }
+
+      const result = await send("/api/register", info, form);
+      if (!result) return;
+
+      if (result.ok) {
+        form.reset();
+        show("account-made-box");
+        return;
+      }
+
+      // 400 = missing or invalid info, 409 = already taken.
+      // Either way we go back to the registration page with the bad boxes marked.
+      const detail = result.data.detail || {};
+      const fields = detail.fields || {};
+
+      if (Array.isArray(fields)) {
+        fields.forEach(name => markField(form, name));
+      } else {
+        for (const [name, text] of Object.entries(fields)) markField(form, name, text);
+      }
+      showError("registration-error", detail.message || "Check the registration info and try again.");
+    });
+
+    // Start on the log-in page
+    show("login-page");
+  </script>
+
+</body>
+</html>
