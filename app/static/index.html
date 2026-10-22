@@ -8,42 +8,85 @@
   <title>DELTA</title>
 
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
-    h1 { margin-bottom: 0; }
-    .subtitle { color: #666; margin-top: 0.25rem; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-    th, td { text-align: left; padding: 0.6rem; border-bottom: 1px solid #ddd; }
-    .status { padding: 2px 10px; border-radius: 10px; font-size: 0.85rem; background: #eee; color: #222; }
-    .status.active { background: #d4f5dc; }
-    .status.maintenance { background: #fff1c2; }
+
+    body { 
+      font-family: system-ui, sans-serif;
+      max-width: 720px;
+      margin: 2rem auto;
+      padding: 0 1rem; 
+    }
+
+    h1 { 
+      margin-bottom: 0; 
+    }
+
+    .subtitle { 
+      color: #667;
+      margin-top: 0.25rem; 
+    }
+
+    table { 
+      width: 100%; 
+      border-collapse: collapse;
+      margin-top: 1rem; 
+    }
+
+    th, td { 
+      text-align: left;
+      padding: 0.6rem;
+      border-bottom: 1px solid #ddd; 
+    }
+
+    .status { 
+      padding: 2px 10px;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      background: #eee;
+      color: #222; }
+
+    .status.active { 
+      background: #d4f5dc; 
+    }
+
+    .status.maintenance { 
+      background: #fff1c2; 
+    }
+
     /* Colors for the change labels */
-    .status.moved { background: #fff1c2; }
-    .status.appeared { background: #d4f5dc; }
-    .status.disappeared { background: #fbd5d5; }
-    /* Simulations */
-    .status.running, .status.stopping { background: #d6e6ff; }
-    .status.finished { background: #d4f5dc; }
-    .status.failed { background: #fbd5d5; }
-    .status.stopped { background: #eee; }
-    button { padding: 0.35rem 0.9rem; font: inherit; border: 1px solid #222; border-radius: 6px; background: #222; color: #fff; cursor: pointer; }
-    button.secondary { background: #fff; color: #222; }
-    button:disabled { opacity: 0.4; cursor: default; }
-    .sim-description { color: #666; font-size: 0.85rem; margin-top: 0.2rem; }
-    #sim-run-header { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; }
-    .sim-buttons { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
-    .sim-note { color: #a15c00; font-size: 0.8rem; margin-top: 0.3rem; }
-    /* The simulation window is 1600 x 800, so let its viewer use more of the
-       screen than the rest of the page does */
-    #sim-viewer { width: min(1600px, calc(100vw - 2rem)); position: relative; left: 50%; transform: translateX(-50%); margin-top: 0.75rem; }
-    #sim-viewer iframe { display: block; width: 100%; aspect-ratio: 2 / 1; border: 1px solid #222; border-radius: 6px; background: #000; }
-    #sim-viewer-help { color: #666; font-size: 0.85rem; margin: 0.4rem 0 0; }
-    #sim-output { background: #111; color: #ddd; font-size: 0.8rem; padding: 0.75rem; border-radius: 6px; height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin-top: 0.5rem; }
+    .status.moved { 
+      background: #fff1c2; 
+    }
+
+    .status.appeared { 
+      background: #d4f5dc; 
+    }
+
+    .status.disappeared { 
+      background: #fbd5d5; 
+    }
+
+    .top { 
+      display: flex; 
+      justify-content: space-between; 
+      align-items: flex-start; 
+    }
+
+    #logout-button { 
+      padding: 0.4rem 0.9rem; 
+      cursor: pointer; 
+    }
+
   </style>
 </head>
 
 <body>
-  <h1>DELTA</h1>
-  <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
+    <header class="top">
+    <div>
+      <h1>DELTA</h1>
+      <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
+    </div>
+    <button id="logout-button">Log out</button>
+  </header>
 
   <h2>Simulations</h2>
   <table>
@@ -101,6 +144,7 @@
       try {
         // Ask our backend for the drones (same address we tested in the browser)
         const response = await fetch("/api/drones");
+        if (response.status === 401) { window.location.href = "/"; return; }  // ticket is gone --> back to login
         if (!response.ok) throw new Error("Server returned " + response.status);
 
         // Turn the JSON text into a list we can loop through
@@ -140,6 +184,7 @@
       try {
         // The backend sends scans newest first, so the first one is the latest
         const sessionsResponse = await fetch("/api/sessions");
+        if (sessionsResponse.status === 401) { window.location.href = "/"; return; }
         if (!sessionsResponse.ok) throw new Error("Server returned " + sessionsResponse.status);
         const sessions = await sessionsResponse.json();
 
@@ -192,209 +237,13 @@
       }
     }
 
-    // ---------- Simulations ----------
-    // The backend starts the simulation scripts inside the habitat conda env
-    // and keeps their output. This part shows that output and polls for more
-    // once a second while something is running.
+    // Log out: tell the server to forget our ticket, then go back to the login page
+    document.getElementById("logout-button").addEventListener("click", async () => {
+      await fetch("/api/logout", { method: "POST" });
+      window.location.href = "/";
+    });
 
-    let linesShown = 0;      // how many output lines are already on screen
-    let shownRun = null;     // which run they belong to (its number)
-    let pollTimer = null;
-
-    async function loadSimulations() {
-      const rows = document.getElementById("sim-rows");
-      const message = document.getElementById("sim-message");
-
-      try {
-        const response = await fetch("/api/simulations");
-        if (!response.ok) throw new Error("Server returned " + response.status);
-        const sims = await response.json();
-
-        rows.innerHTML = "";
-        for (const sim of sims) {
-          const row = document.createElement("tr");
-
-          const info = document.createElement("td");
-          const title = document.createElement("div");
-          title.textContent = sim.title;
-          const description = document.createElement("div");
-          description.className = "sim-description";
-          description.textContent = sim.description;
-          info.append(title, description);
-
-          const buttonCell = document.createElement("td");
-          const buttons = document.createElement("div");
-          buttons.className = "sim-buttons";
-          buttonCell.appendChild(buttons);
-
-          // Simulations with a window get a choice of where it opens
-          const choices = sim.interactive
-            ? [["Run in browser", "browser"], ["Run on server", "server"]]
-            : [["Run", "server"]];
-
-          for (const [label, where] of choices) {
-            const button = document.createElement("button");
-            button.textContent = label;
-            button.className = "sim-start" + (where === "server" && sim.interactive ? " secondary" : "");
-            button.dataset.where = where;
-            button.dataset.browserReady = String(sim.browser_ready);
-            button.addEventListener("click", () => startSimulation(sim.id, where));
-            buttons.appendChild(button);
-          }
-
-          if (sim.interactive && !sim.browser_ready) {
-            const note = document.createElement("div");
-            note.className = "sim-note";
-            note.textContent = "In-browser view needs " + sim.browser_missing.join(", ") +
-              " on the server: sudo apt install xvfb x11vnc novnc websockify";
-            info.appendChild(note);
-          }
-
-          row.append(info, buttonCell);
-          rows.appendChild(row);
-        }
-        unlockButtons(); // greys out "Run in browser" if the server can't do it
-      } catch (error) {
-        message.textContent = "Could not load simulations: " + error.message;
-      }
-    }
-
-    async function startSimulation(id, where) {
-      const message = document.getElementById("sim-message");
-      message.textContent = "";
-      // Starting the in-browser screen takes a second; don't let it be double-clicked
-      document.querySelectorAll(".sim-start").forEach(button => { button.disabled = true; });
-
-      try {
-        const response = await fetch("/api/simulations/" + id + "/start?where=" + where, { method: "POST" });
-        const data = await response.json();
-        if (!response.ok) {
-          message.textContent = data.detail || ("Server returned " + response.status);
-          unlockButtons();
-          return;
-        }
-        // A new run: clear the old output
-        linesShown = 0;
-        shownRun = data.number;
-        document.getElementById("sim-output").textContent = "";
-        pollRun();
-      } catch (error) {
-        message.textContent = "Could not start the simulation: " + error.message;
-        unlockButtons();
-      }
-    }
-
-    function unlockButtons() {
-      document.querySelectorAll(".sim-start").forEach(button => {
-        button.disabled = button.dataset.where === "browser" && button.dataset.browserReady !== "true";
-      });
-    }
-
-    // The in-browser window: noVNC, served by websockify on its own port of
-    // the same server this page came from
-    let viewerShownFor = null;
-
-    function showViewer(run) {
-      const box = document.getElementById("sim-viewer");
-      const frame = document.getElementById("sim-viewer-frame");
-
-      if (!run.viewer) {
-        if (viewerShownFor !== null) {
-          frame.removeAttribute("src");
-          box.hidden = true;
-          viewerShownFor = null;
-        }
-        return;
-      }
-      if (viewerShownFor === run.number) return; // already showing this run
-
-      const base = "http://" + window.location.hostname + ":" + run.viewer.port + "/vnc.html";
-      const options = "?autoconnect=true&reconnect=true&reconnect_delay=1000";
-      frame.src = base + options + "&resize=scale";
-      document.getElementById("sim-viewer-link").href = base + options + "&resize=off";
-      box.hidden = false;
-      viewerShownFor = run.number;
-    }
-
-    async function stopSimulation() {
-      document.getElementById("sim-stop").disabled = true;
-      try {
-        const response = await fetch("/api/simulations/stop", { method: "POST" });
-        if (!response.ok) {
-          const data = await response.json();
-          document.getElementById("sim-message").textContent = data.detail || "Could not stop it";
-        }
-      } finally {
-        pollRun();
-      }
-    }
-
-    async function pollRun() {
-      clearTimeout(pollTimer);
-      try {
-        const response = await fetch("/api/simulations/run?since=" + linesShown);
-        if (!response.ok) throw new Error("Server returned " + response.status);
-        const run = (await response.json()).run;
-        if (!run) return; // nothing has been run since the server started
-
-        // A different run than the one on screen (the server restarted, or
-        // it was started from another tab): clear it and fetch from the top
-        if (run.number !== shownRun) {
-          shownRun = run.number;
-          document.getElementById("sim-output").textContent = "";
-          if (linesShown !== 0) {
-            linesShown = 0;
-            return pollRun();
-          }
-        }
-
-        showRun(run);
-
-        if (run.status === "running" || run.status === "stopping") {
-          pollTimer = setTimeout(pollRun, 1000);
-        }
-      } catch (error) {
-        document.getElementById("sim-message").textContent = "Lost contact with the server: " + error.message;
-      }
-    }
-
-    function showRun(run) {
-      const running = run.status === "running" || run.status === "stopping";
-
-      document.getElementById("sim-run").hidden = false;
-      document.getElementById("sim-run-title").textContent = run.title;
-
-      const badge = document.getElementById("sim-run-status");
-      badge.className = "status " + run.status;
-      badge.textContent = run.exit_code !== null && run.status === "failed"
-        ? "failed (exit code " + run.exit_code + ")"
-        : run.status;
-
-      document.getElementById("sim-run-times").textContent =
-        "Started " + run.started_at + " UTC" + (run.ended_at ? ", ended " + run.ended_at + " UTC" : "");
-
-      document.getElementById("sim-stop").disabled = !running;
-      if (running) {
-        document.querySelectorAll(".sim-start").forEach(button => { button.disabled = true; });
-      } else {
-        unlockButtons();
-      }
-      showViewer(run);
-
-      // Add the new lines, and stay scrolled to the bottom if you already were
-      const output = document.getElementById("sim-output");
-      const atBottom = output.scrollTop + output.clientHeight >= output.scrollHeight - 5;
-      if (run.lines.length > 0) {
-        output.textContent += run.lines.join("\n") + "\n";
-      }
-      linesShown = run.line_count;
-      if (atBottom) output.scrollTop = output.scrollHeight;
-    }
-
-    document.getElementById("sim-stop").addEventListener("click", stopSimulation);
-
-    // Run them all as soon as the page opens
-    loadSimulations().then(pollRun);
+    // Run both as soon as the page opens
     loadDrones();
     loadChanges();
   </script>
