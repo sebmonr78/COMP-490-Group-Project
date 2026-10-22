@@ -3,6 +3,7 @@ import secrets
 import sqlite3
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -23,7 +24,6 @@ async def lifespan(app):
     # simulation it started, and its in-browser screen
     simulations.stop_on_shutdown()
 
-
 app = FastAPI(lifespan=lifespan)
 
 # The Run buttons for the simulation scripts (see simulations.py)
@@ -41,10 +41,11 @@ def query(sql, params=()):
     finally:
         conn.close()
 
-# who is logged in: maps a random session token to a user_id
+# who is logged in: maps a random session token to (user_id, expires_at)
 # it lives in memory, so restarting the server logs everyone out
 SESSIONS = {}
 SESSION_COOKIE = "delta_session"
+SESSION_HOURS = 2  # how long a login lasts before you have to log in again
 
 # reset tokens waiting to be used: token --> (user_id, expires_at)
 # in memory, like SESSIONS, so a server restart forgets them
@@ -53,12 +54,20 @@ RESET_MINUTES = 15
 
 def current_user(request: Request):
     # the logged in user's id, or None if there is no valid ticket
-    return SESSIONS.get(request.cookies.get(SESSION_COOKIE))
+    token = request.cookies.get(SESSION_COOKIE)
+    entry = SESSIONS.get(token)
+    if entry is None:
+        return None
+    user_id, expires_at = entry
+    if expires_at < time.time():
+        del SESSIONS[token]        # ticket ran out, so throw it away
+        return None
+    return user_id
 
 def require_login(request: Request):
     # used on the data endpoints: no valid ticket --> 401, no data
     if current_user(request) is None:
-        raise HTTPException(status_code=401, detail="Log in!! These are not the drones you are looking for.")
+        raise HTTPException(status_code=401, detail="You got to log in!! Your drone is in another castle.")
 
 @app.get("/")
 def home():
@@ -181,8 +190,9 @@ def login(info: LoginInfo, response: Response):
 
     # correct login: give the browser a session ticket
     token = secrets.token_urlsafe(32)
-    SESSIONS[token] = rows[0]["user_id"]
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax")
+    SESSIONS[token] = (rows[0]["user_id"], time.time() + SESSION_HOURS * 3600)
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                        max_age=SESSION_HOURS * 3600)
 
     return {"user_id": rows[0]["user_id"], "first_name": rows[0]["first_name"]}
 
@@ -265,7 +275,7 @@ def reset_password(info: ResetInfo):
         raise HTTPException(status_code=500, detail="Server error: could not save the new password")
 
     del RESET_TOKENS[info.token]          # a link only works once
-    for key in [k for k, u in SESSIONS.items() if u == user_id]:
+    for key in [k for k, (u, _) in SESSIONS.items() if u == user_id]:
         del SESSIONS[key]                 # log out anyone already signed in as them
     return {"message": "Password changed"}
 
