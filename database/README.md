@@ -27,11 +27,12 @@ If you mess up the database and want a fresh one, run `python3 create_db.py --re
 - `db.py` - how the rest of the code should connect to the database
 - `create_db.py` - builds `delta.db` from `schema.sql`
 - `seed.py` - the fake sample data
+- `passwords.py` - hashing and checking login passwords (PBKDF2, built into Python)
 - `test_db.py` - the tests
 
 ## Tables
 
-- `User` - people who log in
+- `User` - people who log in (name, email, phone, password hash)
 - `Drone` - each drone and who owns it (no owner = unpaired)
 - `Session` - one trip where the drone scanned an area
 - `File` - saved RGB frames, depth frames, and map exports
@@ -84,10 +85,9 @@ I tried to keep the SQL standard so this is easier (plain SQL, CHECK constraints
 - SQLite doesn't actually enforce the VARCHAR lengths, so for things like `status`, `file_type`, and `change_type` we used CHECK constraints.
 - There's no cascade delete on purpose. You can't delete a user who still has drones, so scan history can't get wiped by accident.
 - You might see `delta.db-wal` and `delta.db-shm` show up. SQLite makes those while the database is open. They're normal and git ignores them.
-- The seed data is fake, and the password hash in it is just a placeholder.
+- The seed data is fake. The demo user logs in with `demo@example.com` / `demo1234`.
 
 ## Still to do
 
-- connect the front end (login screen and map view)
-- real password hashing once login exists
+- connect the map view to the front end
 - decide where the image and map files get saved so `storage_url` points to something real
