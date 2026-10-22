@@ -31,6 +31,13 @@ def query(sql, params=()):
 
 @app.get("/")
 def home():
+    # login page start
+    return FileResponse(STATIC / "login.html")
+
+
+@app.get("/dashboard")
+def dashboard():
+    # Drones and what changed (where you land after logging in)
     return FileResponse(STATIC / "index.html")
 
 
