@@ -279,10 +279,17 @@ unable to find CUDA device 0 among 1 EGL devices
 The fix routes rendering through Direct3D 12, which does reach the real GPU:
 
 ```bash
+echo 'export GALLIUM_DRIVER=d3d12' >> ~/.bashrc
+```
+
+```bash
 echo 'export MESA_LOADER_DRIVER_OVERRIDE=d3d12' >> ~/.bashrc
 ```
 
 Open a new terminal afterwards. macOS and native Linux users do not need this.
+
+Both lines matter. With only the second, a window opens but Mesa quietly
+draws on the CPU (`llvmpipe`), and everything runs at a few frames a second.
 
 ---
 
@@ -318,7 +325,7 @@ SETUP STATUS: READY WITH 1 WARNING(S)
 ```
 
 That one warning is expected the first time. The drone's navmesh is not part
-of HSSD — see section 12 — and `demo/run_mapping.py` builds it on first run.
+of HSSD — see section 12 — and `run_drone.sh` builds it on first run.
 
 This checks **versions and files only**. It does not test rendering — that is
 section 11.
@@ -330,66 +337,75 @@ Your Python patch number may differ (3.9.26 and so on). That is fine; only
 
 ## 11. Run it
 
+The drone's brain runs in its own conda env, next to the simulator. Set it up
+once:
+
 ```bash
-python demo/run_mapping.py
+bash setup/setup_brain.sh
 ```
 
-The first run pauses to build the drone navmesh and to load Depth Anything.
-Later runs start faster.
+```bash
+bash setup/setup_rtabmap.sh
+```
 
-Five panels:
+The first makes the `brain` env (PyTorch, Depth Anything 3). The second
+installs RTAB-Map and compiles the small C++ bridge the brain talks to it
+through. Then:
 
-| | |
-|---|---|
-| **Behind the drone** | a camera following it, so you can see where it is |
-| **What the drone believes** | the map it has built FOR ITSELF, growing as it drives. Nothing in it came from the simulator. |
-| **Left lens** | the raw picture the stereo pair is looking at |
-| **Depth the drone is using** | stereo's metres, with Depth Anything filling the gaps stereo could not match |
-| **Status** | what each stage costs, and how far the drone's idea of where it is has drifted from the truth |
+```bash
+cd ~/COMP-490-Group-Project/simulation && bash run_drone.sh --fresh
+```
 
-The map is not a floor plan. Every square is a stack of 10 cm layers, and the
-colour says what the drone could **do** there — see section 13.
+Two processes start: the brain (env `brain`, its log in
+`outputs/logs/brain.log`) and the sim window (env `habitat`). They talk over a
+local socket, which is how the real drone will reach the laptop. The first run
+builds the drone's navmesh and loads Depth Anything, so it is slow to start.
+
+On the left is the house, seen from behind the drone. On the right is the map
+**the brain built for itself**, drawn over the true layout in grey. Where the
+two disagree is the brain's error.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `←` `→` | drive the drone, by compass |
-| `1` | take off, hold to climb |
-| `0` | descend, hold to land |
-| `V` | free camera: `WASD` to fly it, `IJKL` to look |
-| `M` | show the true layout behind the drone's map |
-| click the map | plan a route **on the drone's own map** to that spot |
-| `Enter` | follow it |
+| `↑` `↓` | roll forward, back |
+| `←` `→` | turn |
+| `1` | take off; hold to climb |
+| `0` | hold to descend and land |
+| `Shift` | faster |
+| `V` | free camera: `WASD`, `IJKL`, `Z` `X` |
+| `M` | show or hide the true layout |
+| click the map | plan a route **on the brain's own map** |
+| `G` | follow it |
 | `C` | clear it |
-| `Tab` | save the map to `data/maps/live.npz` |
-| `P` | print believed and true position |
-| `Shift` | move faster |
-| `Esc` | quit |
+| `R` | roam to a random spot (a stand-in for a person at the keys) |
+| `Tab` | save the map |
+| `F12` | screenshot |
+| `Esc` | quit; the brain saves its map |
 
-Useful flags:
+Without `--fresh` the brain starts from the map it saved last time.
 
-```bash
-python demo/run_mapping.py --no-map
-```
-
-Stereo and localization only, no Depth Anything — about three times faster,
-for when you are working on the driving rather than the map.
+**One part at a time.** Each part of the brain can be swapped for the
+simulator's ground truth, so that one part can be checked on its own:
 
 ```bash
-python demo/run_mapping.py --frames 120
+bash run_localization.sh
 ```
 
-Drives itself and quits, printing what it mapped. For checking the whole
-thing still runs without anyone at the keyboard.
+Only localization is real: depth is the truth, so anything wrong in the map is
+the position being wrong. The general switches, for `run_drone.sh` too:
 
-```bash
-python demo/run_mapping.py --load data/maps/live.npz
-```
+| | |
+|---|---|
+| `--pose oracle` | the true position instead of RTAB-Map's |
+| `--depth oracle` | the true depth instead of Depth Anything's |
+| `--no-odometer` | take the cage's axle encoder out |
+| `--script FILE` | drive from a script (`tests/scripts/`) |
+| `--trace FILE` | log position error and RTAB-Map health |
+| `--headless` | no window |
 
-Carries on from a map you saved earlier.
-
-**This is the real test.** `check_setup.py` can report READY on a machine that
-still cannot draw anything. If this window opens and the right-hand panel
-starts filling in as you drive, your setup is genuinely complete.
+**This is the real test of the setup.** `check_setup.py` can report READY on
+a machine that still cannot draw anything. If this window opens and the map
+fills in as you drive, your setup is complete.
 
 ---
 
@@ -447,218 +463,100 @@ drone kept going" is not something you would otherwise notice.
 
 ## 13. Seeing, knowing where it is, and remembering
 
-Sections 11 and 12 are the drone's *body*. This is its *mind*, and almost all
-of it was ported from the group's other Habitat project, Spatial Memory
-Glasses, where each piece was built and measured against ground truth. A
-stereo pair does not care whether it is on a head or in a ball.
-
-Nothing in this stack may read Habitat. The simulator renders two pictures
-and nothing else. The moment any of it reads a true position or the navmesh,
-every number the project reports stops meaning anything — a map that is right
-because it was told the answer is not a result.
+Sections 11 and 12 are the drone's *body*. This is its *mind*, in
+`delta/brain/`. It was ported from the group's other Habitat project, Spatial
+Memory Glasses (`spatial-agent-12`), where each piece was built and measured
+against ground truth. A stereo pair does not care whether it is on a head or
+in a ball.
 
 ```
-two camera images  ->  stereo        metres, where it can find a match
-                   ->  Depth Anything a depth for every pixel, rescaled by stereo
-                   ->  tracker       where am I (SLAM, and it drifts)
-                   ->  GapMap        a grid of vertical columns
-                   ->  MapPlanner    a route through that grid
+two camera images, IMU, axle encoder
+   -> localize.py    RTAB-Map: where am I; loop closures correct the past
+   -> depth.py       Depth Anything 3, scaled from the floor
+   -> occupancy.py   the map at rolling height, and indoors vs outdoors
+   -> planner.py     routes on that map
 ```
 
-### Why there are two depth estimates
+**Nothing in the brain may read Habitat.** The simulator sends what the
+drone's own hardware would measure -- two pictures, the IMU, the encoder --
+and nothing else. A map that is right because it was told the answer is not a
+result. Ground truth is used only to *score* the brain, or, with the oracle
+switches, to stand in for one part while another is checked. The one
+exception still left is altitude: the sim tells the brain how high it is
+flying. Replacing that with a measurement is the next piece of work.
 
-Neither one is enough on its own, and the way they fail is opposite:
+### Localization
 
-| | covers | error | scale |
-|---|---|---|---|
-| **Stereo (SGBM)** | only where it finds a match — a blank wall comes back empty | ~1% | real metres |
-| **Depth Anything 3** | every pixel | ~8% | not trustworthy, and drifts across the frame |
+RTAB-Map tracks features between the two cameras and from frame to frame,
+and recognises places it has seen before (a loop closure), which pulls the
+accumulated drift back out. The IMU's heading carries it through turns in
+front of blank walls.
 
-So stereo is used as a *ruler*: each frame, `StereoFill` fits a smooth scale
-surface over the picture from the pixels where both have an answer, and
-rescales Depth Anything into stereo's units. The result is dense like DA3 and
-measured like stereo, and it is the only reason the map is in metres at all.
+When the cameras see nothing at all -- pressed against a wall, closer than
+the 17 cm stereo can measure -- the cage's axle encoder says how far the ball
+actually rolled. Without it, the brain had to assume the drone kept moving at
+its last speed, and against a wall that put it 0.75 m past where it
+really was.
 
-### The map, and the thing it had to learn
+Measured motion by motion (`tests/scripts/motions.json`, three runs): turning,
+even at 120 degrees a second, taking off, climbing and flying add a few
+centimetres at most. Descending to land is the weakest motion.
 
-The glasses stored one number per floor square: the tallest thing in it. That
-is right for a walking person, whose only answer to an obstacle is "go
-around". A drone has three answers, and none of them can be read off a single
-height:
+### The map
 
-| | height | what is around it | answer |
-|---|---|---|---|
-| a sofa | 0.9 m | clear above | fly **over** |
-| a dining table | 0.75 m | clear below | roll **under** |
-| a bookcase | 2.0 m | solid to the ceiling | go **around** |
+A grid of 5 cm squares, built only from what the drone has seen. An obstacle
+is anything 8 to 38 cm above the floor -- the drone's own height, plus a
+margin -- because this is the map of where it can **roll**. Free floor is
+floor it actually saw. A second layer records whether each square is under a
+roof, which is how it tells the house from the garden.
 
-The sofa and the table are nearly the same square to a height map. The
-difference is not how tall they are, it is **where the empty space is**. So
-`delta/gap_map.py` stores the whole vertical column: every floor square is
-split into 10 cm layers, and each layer is `SOLID`, `FREE`, or `UNKNOWN`.
-
-`FREE` is the half that does not come for free. A depth pixel at 3 m says two
-things — there is something at 3 m, *and there is nothing in the 3 m in
-between*. Without the second half, the air above the sofa is merely `UNKNOWN`,
-indistinguishable from the inside of the bookcase, and the drone can never
-justify flying over anything. So every sampled pixel **carves its own ray
-clear** along its length. That is the only reason this map can say "go over"
-rather than "nothing has contradicted going over".
-
-`GapMap.classify()` reduces a column to what the drone can do there, and the
-awkward case is worth knowing about:
-
-- **the ceiling.** "Something solid overhead with room underneath" describes a
-  dining table — and also every square of floor in a building. The first
-  version of this coloured almost an entire house as roll-under. What
-  separates a table from a ceiling is not height (a mezzanine is high, a
-  crawlspace is low); it is that **a table has free space above it and a
-  ceiling does not**. That is the test, and it needs no threshold to tune.
-- **unmapped ground.** A square where the air is clear but the floor was never
-  seen is flyable and not rollable — exactly like a square with a sofa in it.
-  Reporting both as "fly over" would claim a measured obstacle where the truth
-  is an unanswered question, so they are separate: `OVER` and `AIRBORNE`.
-
-### Navigating on it
-
-`delta/map_navigation.py` plans A\* over `(row, column, level)` — a floor
-square and a height — using nothing but what the drone has mapped. It is the
-same job `navigation.py` does on Habitat's navmesh, done honestly, and three
-things follow:
-
-- **it can be wrong.** The map has holes, so a plan can fail. That is real
-  information: "not through anything I have seen" is a different answer from
-  "there is no way", and the cure is to go and look.
-- **it knows about height**, so a route can go over and under things.
-- **it chooses how to move.** Rolling costs 1 per metre, flying 4, climbing 6
-  (`DEFAULT_COSTS`). Nothing anywhere decides between rolling and flying — the
-  cheapest route is a rolling route wherever one exists, and flight appears
-  exactly where the proposal says it should. That is feature 4, and it falls
-  out of A\* rather than being ruled on.
-
-### Run it
-
-Drive the drone, build a map from its own cameras, plan on it, save it:
+### Measuring it
 
 ```bash
-python tools/run_mapping.py --steps 80 --speed 0.10 --save data/maps/first.npz
+bash tools/repeat.sh NAME 3 tests/scripts/motions.json --depth oracle
 ```
-
-Look at the map it built:
 
 ```bash
-python tools/plot_map.py data/maps/first.npz --scale 4
+python3 tools/segments.py outputs/repeat/NAME/run*_trace.jsonl
 ```
 
-Inspect one square, layer by layer, when the picture makes you suspicious:
-
-```bash
-python tools/plot_map.py data/maps/first.npz --column 200 200
-```
-
-Measured on the default house, 80 frames at 1 m/s: **1.0% drift** over 5 m
-with 78 of 80 frames tracked visually, 55.8 m² of floor mapped, and a 6.2 m
-rolling route planned on the drone's own map in 16 ms.
-
-### Where localization stands, honestly
-
-The tracker is visual-inertial odometry with keyframes, and **it has no loop
-closure**: error only grows, and returning to a room it has already mapped
-corrects nothing. Over a short, gentle drive it holds to about 1% of the
-distance travelled. It comes apart in three situations, all of them measured:
-
-| | why |
-|---|---|
-| nose-up against a blank wall | nothing to track, and the floor is too close to give depth |
-| turning fast | a view that swings far between frames leaves ORB nothing to match |
-| **a slow frame rate** | the drone covers more ground between frames than the matcher can bridge |
-
-The third is the one to watch, because it is not really the tracker's fault:
-at 2 frames a second the drone travels 0.4 m and swings 30 degrees between
-frames, and tracking fails outright. Keep the window fast, drive gently, and
-watch the drift figure in the status panel. If it climbs, slow down.
-
-Two things make the window slow, and both have been dealt with once already:
-classifying the whole map twice per screen frame (now done once per *map*
-frame), and **software rendering** — if the status shows a few frames a
-second, check `echo $MESA_LOADER_DRIVER_OVERRIDE` says `d3d12`, because
-without it Mesa falls back to `llvmpipe` on the CPU and everything else
-is beside the point.
-
-The real fix for localization is **RTAB-Map**, which the group's other
-project already runs: it adds loop closure, so revisiting a room corrects the
-map behind you instead of leaving two copies of each wall. That is a port
-worth doing, and it is the next thing this stack needs.
-
-Two numbers that will bite you if you change them:
-
-- **drive slower than 3 m/s.** `position.json` rejects a visual match that
-  implies a bigger jump, as an impossible one. Driving the drone at 3.5 m/s
-  sent 14 of 40 frames to the IMU fallback and the drift to 34%.
-- **keep the cameras level.** `config/rig.json` explains at length why
-  `measured.pitch` is 0 and what has to change before it can be anything else.
+`repeat.sh` runs a script several times, because localization is not
+deterministic: the same drive can end a few centimetres or a metre off.
+`segments.py` breaks the result down by motion. `tools/diagnose.sh` runs the
+same drive with each part real and true in turn; `tools/summarize_run.py`
+summarizes one run. `HSSD_SCENE=<scene id>` runs everything in another house.
 
 ---
 
 ## 14. What is in this folder
 
-Kept deliberately small. Every file here is on the path from two camera
-images to a route the drone can follow; nothing else is.
-
 ```
-config/project.json         every setting: env name, versions, data paths, scene, drone size
+run_drone.sh                the brain and the sim window, together
+run_localization.sh         the same, with only localization real
+
+config/project.json         env name, versions, data paths, scene, drone size
 config/rig.json             the cameras, as hardware: baseline, lens, mounting
-config/stereo.json          SGBM settings and the floor finder
-config/position.json        the tracker, its keyframes, and the simulated IMU
-config/map.json             the grid, and how depth becomes map
+config/brain.json           the brain's settings, each with why
 config/check_setup.py       verifies you have all of it
 
 delta/drone.py              the drone: a sphere that rolls, flies and collides
-delta/sim.py                WORLD SIDE: opens the house, builds the navmesh,
-                            moves the sensor head, renders
+delta/sim.py                WORLD SIDE: the house, the navmesh, the sensors
 delta/rig.py                where the lenses are and what they can see
-delta/stereo.py             rectify, SGBM, points, floor height
-delta/depth_model.py        Depth Anything 3, rescaled into stereo's metres
-delta/tracker.py            localization: corners + depth + IMU -> where am I
-delta/imu.py                a simulated IMU chip
-delta/gap_map.py            the map: vertical columns, and where the gaps are
-delta/map_navigation.py     routes on the map the drone built itself
-delta/world_frame.py        joining the map's frame to Habitat's
-delta/brain.py              wires the five stages together
+delta/frames.py             coordinate frames
+delta/wire.py               the socket between the sim and the brain
+delta/brain/                the brain (section 13); never reads Habitat
 
-demo/run_mapping.py         THE demo: drive the drone and watch it map
-tools/plot_map.py           draw a saved map, or print one column of it
+demo/run_drone.py           the sim window, and the scripts that drive it
+setup/                      the brain env, and RTAB-Map with its bridge
 tests/test_drone.py         flies the drone at things, checks something stopped it
-tests/test_mapping.py       checks the map understands gaps and routes use them
-.gitignore                  keeps the 17 GB of data, and saved maps, out of git
+tests/test_brain.py         the brain's pieces, and that it reads no truth
+tests/scripts/              scripted drives for the tools below
+tools/                      measuring the brain against the truth
 ```
 
 The one line that matters most: **`delta/sim.py` is the only file allowed to
-read Habitat.** `delta/brain.py` and everything it imports get two images and
-an IMU reading, and nothing else. A brain that can reach the pathfinder will
-eventually be "helped" with it, and then none of the project's numbers mean
-anything.
-
-Three things were deliberately removed rather than kept "just in case":
-
-- **a second demo.** `demo/run_mapping.py` drives the drone *and* shows the
-  map, so a drive-only window was two places to fix the same bug. Its scene
-  loading moved into `delta/sim.py`, where the tests can reach it too.
-- **routes on Habitat's navmesh.** The drone plans on its own map now. The
-  navmesh is still there — it is what `drone.drive` rolls on — but planning
-  with it was planning with the answer key.
-- **a headless copy of the demo.** `--frames` does the same run in the same
-  file.
-
-Run both test suites any time with:
-
-```bash
-python tests/test_drone.py && python tests/test_mapping.py
-```
-
-`tests/test_mapping.py` needs no scene, no GPU and no Depth Anything — it
-builds maps by hand, one obstacle at a time, so every check has exactly one
-right answer. It is the fast one to run while editing.
+read Habitat**, and `delta/brain/` gets only what real sensors would give.
+`tests/test_brain.py` checks that.
 
 ---
 
@@ -687,14 +585,14 @@ harmless.
 | `unable to find CUDA device 0 among 1 EGL devices` | WSL rendering | section 9 |
 | `ModuleNotFoundError: habitat` | installed into the wrong env | check the prompt, redo section 6 |
 | `ModuleNotFoundError: delta` | run from the wrong folder | `cd ~/COMP-490-Group-Project/simulation` first |
-| Window opens black | GPU not reached | `echo $MESA_LOADER_DRIVER_OVERRIDE` must say `d3d12` |
+| Window opens black, or everything is slow | rendering on the CPU | `echo $GALLIUM_DRIVER` must say `d3d12` (section 9) |
 | Drone will not take off | no room overhead | drive it out from under the furniture and press `1` again |
-| Drone will not follow a route | it is airborne | press and hold `0` to land, then `Enter` |
-| `No map was built` | the floor was never measured, so the map had no datum | check `config/stereo.json`; the floor must come into view at least once |
-| Tracker falls back to the IMU constantly | driving faster than `max_speed` | slow down, or raise it in `config/position.json` |
+| "Waiting for the brain..." never ends | the brain failed to start | read `outputs/logs/brain.log` |
+| `Another DELTA brain is already running` | a second run was started | close the other window first; two runs share one port |
+| `No RTAB-Map bridge` | the bridge was never compiled | `bash setup/setup_rtabmap.sh` |
+| No map appears | the floor was never seen, so depth had no scale | drive where the floor is in view |
 | Camera height reads far too low | the cameras are not level | `measured.pitch` in `config/rig.json` must be 0 -- read the note there |
-| `NO ROUTE` on the drone's own map | the mapped floor is in disconnected pieces | drive further; `run_mapping.py` prints how many regions it found |
-| `ModuleNotFoundError: depth_anything_3` | DA3 is not installed in this env | run with `--no-map` for stereo and SLAM only |
+| `ModuleNotFoundError: depth_anything_3` | the brain env is missing DA3 | `bash setup/setup_brain.sh` |
 
 If something fails and this table does not cover it, paste the whole output.
 The checker is written to say exactly what it found.
