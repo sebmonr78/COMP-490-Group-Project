@@ -124,6 +124,7 @@ class Rig:
         distortion:     camera name -> OpenCV plumb-bob coefficients
         baseline:       metres between the stereo pair, centre to centre
         source:         where this came from, for printing
+        rangefinder:    the down-facing distance sensor (see rig.json)
     """
 
     cameras: tuple
@@ -133,6 +134,7 @@ class Rig:
     distortion: dict
     baseline: float
     source: str = "config/rig.json"
+    rangefinder: dict = None
 
     # -----------------------------------------------------------------
     # Looking things up
@@ -531,6 +533,11 @@ def load(path=None):
         distortion=distortion,
         baseline=baseline,
         source=str(path.name),
+        rangefinder={
+            key: value
+            for key, value in data.get("rangefinder", {}).items()
+            if not key.startswith("_")
+        },
     )
 
 

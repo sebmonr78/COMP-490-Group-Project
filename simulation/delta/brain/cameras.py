@@ -36,10 +36,21 @@ class StereoFrame:
     # roll and the reading means nothing.
     odometer: Optional[float] = None
 
+    # The down-facing rangefinder: metres from it to the nearest surface
+    # below -- floor or furniture, it cannot tell which. None: no echo.
+    range_down: Optional[float] = None
+
+    # The brain's own estimate of how high the drone's underside is above
+    # the floor at this frame, filled in by the brain (height.py), so the map
+    # uses the height of the moment the picture was taken.
+    altitude: Optional[float] = None
+
     # ORACLE, simulation only: Habitat's pose of the left lens as
-    # (position xyz, quaternion wxyz), and its planar depth in metres.
+    # (position xyz, quaternion wxyz), its planar depth in metres, and the
+    # drone's true altitude.
     true_pose: Optional[tuple] = None
     true_depth: Optional[np.ndarray] = None
+    true_altitude: Optional[float] = None
 
     @property
     def size(self):
@@ -66,6 +77,8 @@ def from_message(message):
         imu_pitch=fields.get("imu_pitch"),
         imu_roll=fields.get("imu_roll"),
         odometer=fields.get("odometer"),
+        range_down=fields.get("range_down"),
         true_pose=true_pose,
         true_depth=arrays.get("true_depth"),
+        true_altitude=fields.get("true_altitude"),
     )

@@ -160,8 +160,58 @@ def the_brain_ignores_truth_it_was_not_given():
 
     assert frame.true_pose is None, "a frame invented a true pose"
     assert frame.true_depth is None, "a frame invented a true depth"
+    assert frame.true_altitude is None, "a frame invented a true altitude"
 
     return "a plain frame carries no truth"
+
+
+# What the drone's own hardware measures, and so all a frame may carry
+# besides oracle fields: the clock, the IMU, the cage's axle encoder and the
+# down-facing rangefinder. The cameras' pictures travel as arrays.
+SENSOR_FIELDS = {"id", "stamp", "imu_yaw", "imu_pitch", "imu_roll", "odometer", "range_down"}
+
+
+def the_sim_sends_only_what_sensors_measure():
+    """Every field of a frame is a sensor reading, or a true_* oracle field.
+
+    The true_* test above cannot see a truth sent under an innocent name.
+    That is not hypothetical: the sim sent Habitat's altitude as plain
+    "altitude" for weeks, and the brain built every flying map from it.
+    """
+    source = (PROJECT_ROOT / "demo" / "run_drone.py").read_text()
+    tree = ast.parse(source)
+
+    sender = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_send_frame"
+    )
+
+    sent = set()
+
+    for node in ast.walk(sender):
+        # fields = {"id": ..., ...}
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "fields" for t in node.targets
+        ) and isinstance(node.value, ast.Dict):
+            sent.update(k.value for k in node.value.keys if isinstance(k, ast.Constant))
+
+        # fields["x"] = ...
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                        and target.value.id == "fields"):
+                    key = getattr(target.slice, "value", None)
+
+                    if isinstance(key, str):
+                        sent.add(key)
+
+    assert sent, "found no frame fields at all -- has _send_frame changed shape?"
+
+    unknown = sorted(k for k in sent if k not in SENSOR_FIELDS and not k.startswith("true_"))
+
+    assert not unknown, f"the sim sends fields no sensor measures: {unknown}"
+
+    return f"{len(sent)} fields, all sensor readings or oracle-only"
 
 
 # ---------------------------------------------------------------------
@@ -398,10 +448,88 @@ def a_loop_closure_redraws_the_map():
     return f"{kept} scans redrawn at corrected poses"
 
 
+# ---------------------------------------------------------------------
+# Height, from the rangefinder
+# ---------------------------------------------------------------------
+
+
+def the_height_survives_flying_over_a_table():
+    """Take off, climb to 1 m, fly over a 0.75 m table, climb a little over
+    it, leave it, land -- the readings a rangefinder would give, frame by
+    frame at 10 a second. The altitude must follow the climbing and NOT the
+    table, and the table must be seen for what it is."""
+    from delta.brain import height as height_module
+
+    radius, below, speed = 0.15, 0.10, 0.8
+    estimate = height_module.Height(radius, below, speed)
+
+    def reading(altitude, surface=0.0):
+        # Sensor to the surface: lens height minus the sensor's offset,
+        # minus whatever is under it.
+        return radius + altitude - below - surface
+
+    plan = (
+        [(0.0, 0.0)] * 10                                         # on the floor
+        + [(0.05 * i, 0.0) for i in range(1, 21)]                 # climb at 0.5 m/s
+        + [(1.0, 0.0)] * 10                                       # hover
+        + [(1.0, 0.75)] * 10                                      # over the table
+        + [(1.0 + 0.04 * i, 0.75) for i in range(1, 6)]           # climb over it
+        + [(1.2, 0.75)] * 5
+        + [(1.2, 0.0)] * 10                                       # past its edge
+        + [(1.2 - 0.06 * i, 0.0) for i in range(1, 21)]           # descend, land
+        + [(0.0, 0.0)] * 10
+    )
+
+    worst = 0.0
+    surface_seen = []
+
+    for i, (altitude, surface) in enumerate(plan):
+        got = estimate.update(reading(altitude, surface), 0.1 * i)
+        worst = max(worst, abs(got - altitude))
+
+        if surface > 0.0:
+            surface_seen.append(estimate.surface)
+
+    assert worst < 0.02, f"altitude off by {worst:.3f} m at worst"
+    assert abs(min(surface_seen) - 0.75) < 0.02 and abs(max(surface_seen) - 0.75) < 0.02, (
+        f"the table was read as {min(surface_seen):.2f}-{max(surface_seen):.2f} m, not 0.75"
+    )
+    assert estimate.surface == 0.0, "the table stayed behind after the drone left it"
+
+    return f"altitude within {worst * 100:.1f} cm; table seen as 0.75 m, and forgotten after"
+
+
+def something_low_at_the_edge_of_the_cone_leaves_no_trace():
+    """Measured in a real run: at 1 m up, something 9 cm tall slipped into
+    the rangefinder's cone in one frame and drifted back out of it over
+    several. Taken for furniture on the way in and for climbing on the way
+    out, it left the brain 9 cm high all the way down to the floor."""
+    from delta.brain import height as height_module
+
+    radius, below = 0.15, 0.10
+    estimate = height_module.Height(radius, below, 0.8)
+
+    readings = (
+        [radius + 1.0 - below] * 10                                   # 1 m up, over floor
+        + [radius + 1.0 - below - 0.09] * 5                            # in: one step
+        + [radius + 1.0 - below - 0.09 + 0.018 * i for i in range(1, 6)]   # out: slowly
+        + [radius + 1.0 - below] * 10
+    )
+
+    for i, reading in enumerate(readings):
+        got = estimate.update(reading, 0.1 * i)
+
+    assert abs(got - 1.0) < 0.02, f"it ended {got - 1.0:+.3f} m off"
+    assert estimate.surface == 0.0, f"a {estimate.surface:.2f} m surface was left behind"
+
+    return f"ended {abs(got - 1.0) * 100:.1f} cm off, nothing left behind"
+
+
 TESTS = [
     the_brain_cannot_reach_the_simulator,
     the_truth_is_only_sent_when_asked_for,
     the_brain_ignores_truth_it_was_not_given,
+    the_sim_sends_only_what_sensors_measure,
     the_floor_is_found_at_a_drone_height,
     the_floor_is_still_found_at_a_head_height,
     a_wrong_scale_is_refused,
@@ -411,6 +539,8 @@ TESTS = [
     a_scan_marks_floor_free_and_walls_solid,
     a_flying_drone_does_not_clear_the_floor_beneath_it,
     a_loop_closure_redraws_the_map,
+    the_height_survives_flying_over_a_table,
+    something_low_at_the_edge_of_the_cone_leaves_no_trace,
 ]
 
 

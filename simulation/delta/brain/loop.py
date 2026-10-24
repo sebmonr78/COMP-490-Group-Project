@@ -42,6 +42,7 @@ from delta.brain import (
     cameras,
     config,
     depth as depth_module,
+    height as height_module,
     localize,
     map_localize,
     navmap,
@@ -133,9 +134,17 @@ class Brain:
         )
 
         # While it flies, the lenses rise with it, and every height the map
-        # records is measured from the lens. The sim sends the altitude so the
-        # map still puts the floor at the floor.
+        # records is measured from the lens. The brain works out how high it
+        # is from its own rangefinder (height.py); "oracle" takes Habitat's
+        # true altitude instead, to measure what the estimate costs.
+        self.altitude_source = hello.get("altitude", "rangefinder")
+        self.height = height_module.Height(
+            self.lens_height,
+            (rig.rangefinder or {}).get("below_lens", 0.10),
+            settings.drone.max_climb_speed,
+        )
         self.altitude = 0.0
+        self.altitude_frame = None
 
         self.use_tilt = bool(hello.get("use_tilt", True))
         self.map_localize = bool(hello.get("map_localize", False))
@@ -333,7 +342,16 @@ class Brain:
         pair = self.rectifier(frame)
 
         # While flying, the lenses are the altitude higher above the floor.
-        self.altitude = float(message.fields.get("altitude", 0.0) or 0.0)
+        # Worked out on every frame, in order, before anything else looks at
+        # it, and kept with the frame so the map uses the height of the moment
+        # the picture was taken rather than of whenever it gets round to it.
+        if self.altitude_source == "oracle" and frame.true_altitude is not None:
+            self.altitude = float(frame.true_altitude)
+        else:
+            self.altitude = self.height.update(frame.range_down, frame.stamp)
+
+        frame.altitude = self.altitude
+        self.altitude_frame = frame.id
 
         self.localizer.submit(frame, pair)
         self.latest.put(frame.id, (frame, pair))
@@ -463,7 +481,8 @@ class Brain:
 
             # The lens height the map measures from. On the ground it is the
             # drone's radius; airborne, it is that plus however high it is.
-            lens_height = self.lens_height + self.altitude
+            altitude = self.altitude if frame.altitude is None else frame.altitude
+            lens_height = self.lens_height + altitude
 
             started = time.monotonic()
             depth_map = self.depth.estimate(pair, frame)
@@ -511,7 +530,7 @@ class Brain:
                 tilt=tilt,
                 # On the ground the drone's own footprint is known free. In
                 # the air it is not: there may be nothing under it at all.
-                footprint_free=self.altitude < 0.05,
+                footprint_free=altitude < 0.05,
                 roofed=roofed,
             )
 
@@ -718,6 +737,11 @@ class Brain:
             "floor_scale": round(self.floor.scale, 3),
             "lens_height": round(self.lens_height + self.altitude, 3),
             "altitude": round(self.altitude, 3),
+            "altitude_source": self.altitude_source,
+            "altitude_frame": self.altitude_frame,
+            # What the rangefinder says is under the drone: 0 is the floor.
+            "surface_below": round(self.height.surface, 3),
+            "range_down": None if self.height.reading is None else round(self.height.reading, 3),
             "map_localize": (
                 dict(self.corrector.stats) if self.corrector is not None else None
             ),

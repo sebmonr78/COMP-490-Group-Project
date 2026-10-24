@@ -66,7 +66,7 @@ from habitat.utils.visualizations import maps  # noqa: E402
 
 from delta import frames, wire  # noqa: E402
 from delta.brain import config as brain_config  # noqa: E402
-from delta.sim import Imu, Odometer, World  # noqa: E402
+from delta.sim import Imu, Odometer, Rangefinder, World, first_hit  # noqa: E402
 
 WINDOW = (1600, 960)
 TOP = 560
@@ -120,6 +120,8 @@ def parse_arguments():
     parser.add_argument("--fresh", action="store_true", help="the brain forgets everything first")
     parser.add_argument("--no-odometer", action="store_true",
                         help="take the cage's axle encoder out, to measure what it adds")
+    parser.add_argument("--altitude", choices=["rangefinder", "oracle"], default="rangefinder",
+                        help="where the brain's height comes from (oracle: Habitat's truth)")
     parser.add_argument("--trace", type=str, default=None,
                         help="write pose error and RTAB-Map health 4 times a second to this file (JSON lines)")
     parser.add_argument("--no-tilt", action="store_true",
@@ -263,6 +265,7 @@ class DroneApp:
         self._tilt_error = np.zeros(2)
         self.odometer = Odometer(seed=9)
         self._rolled_from = None
+        self.rangefinder = Rangefinder(self.rig.rangefinder or {}, self.world.simulator, seed=10)
         self.frame_rate = float(self.settings.cameras.frame_rate)
 
         self.floor_height = float(self.world.drone.floor_position.y)
@@ -282,6 +285,7 @@ class DroneApp:
                     "height": height,
                     "pose": args.pose,
                     "depth": args.depth,
+                    "altitude": args.altitude,
                     "fresh": args.fresh,
                     "use_tilt": not args.no_tilt,
                     "map_localize": getattr(args, "map_localize", False),
@@ -294,6 +298,7 @@ class DroneApp:
 
         self.alignment = Alignment()
         self.truth_by_frame = {}
+        self.height_by_frame = {}
 
         # One trace per run. It is appended to line by line as the run goes,
         # so it has to be emptied at the start -- otherwise a second run with
@@ -763,6 +768,12 @@ class DroneApp:
         )
         self.truth_by_frame.pop(self.frame_id - 600, None)
 
+        # Height and what is under the drone, per frame, so the brain's
+        # estimate is scored against the moment it was made, not a few frames
+        # later -- at 0.8 m/s a 0.15 s lag alone is 12 cm.
+        self.height_by_frame[self.frame_id] = (round(self._true_altitude(), 3), self._surface_below())
+        self.height_by_frame.pop(self.frame_id - 600, None)
+
         previous = self.truth_by_frame.get(self.frame_id - 1)
 
         if previous is not None:
@@ -777,11 +788,18 @@ class DroneApp:
                 # The IMU rides the gimbal, so it turns with the sensor
                 # head -- which, for a sphere, is the only heading there is.
                 "imu_yaw": self.imu.read(self.world.heading, self.clock),
-                # How high the lenses are above the floor right now. Every
-                # height the brain records is measured down from the lens, so
-                # without this the whole map shifts when the drone climbs.
-                "altitude": float(self.world.altitude),
             }
+
+            # The down-facing rangefinder: how far below it the nearest
+            # surface is. The brain works out its own height from this
+            # (delta/brain/height.py); it is no longer told the altitude.
+            reading = self.rangefinder.read(self.world.drone)
+
+            if reading is not None:
+                fields["range_down"] = reading
+
+            if self.args.altitude == "oracle":
+                fields["true_altitude"] = self._true_altitude()
 
             # Pitch and roll from gravity, as the IMU chip reports them: the
             # head's true tilt plus an error that wanders slowly -- about half
@@ -853,8 +871,12 @@ class DroneApp:
         """One line of --trace: where the drone is, where it thinks it is,
         and how RTAB-Map is doing."""
         error = self._pose_error(state)
-        loc = state.get("stats", {}).get("localization", {})
+        stats = state.get("stats", {})
+        loc = stats.get("localization", {})
         here = self.world.drone.floor_position
+        height_then = self.height_by_frame.get(
+            stats.get("altitude_frame"), (round(self._true_altitude(), 3), self._surface_below())
+        )
         line = {
             "t": round(self.clock, 2), "frame": state["pose"]["frame"], "walked": round(self.walked, 2),
             "true": [round(float(here.x), 2), round(-float(here.z), 2), round(float(self.world.heading), 3)],
@@ -866,8 +888,14 @@ class DroneApp:
             # How high the drone really is, and how high the brain thinks it
             # is. Logged side by side so flying can be judged the same way as
             # driving: by the gap between the two.
-            "altitude_true": round(float(self.world.altitude), 3),
-            "altitude_brain": state.get("stats", {}).get("altitude"),
+            # Above the floor, at the frame the brain's estimate is from.
+            "altitude_true": height_then[0],
+            "altitude_brain": stats.get("altitude"),
+            # What is under the drone: the true height of the surface straight
+            # below (0 over the floor, ~0.75 over a table), and what the brain
+            # made of its rangefinder.
+            "surface_true": height_then[1],
+            "surface_brain": stats.get("surface_below"),
             "flying": bool(self.world.flying),
             # The script's current {"label": ...}: which motion this is.
             "label": self.script.label if self.script is not None else None,
@@ -1162,8 +1190,14 @@ class DroneApp:
 
         altitude = stats.get("altitude")
 
-        if altitude:
-            parts.append(f"altitude {altitude:.2f} m")
+        if altitude is not None and (altitude > 0.02 or self.world.flying):
+            # The brain's height next to the truth, and what it thinks is
+            # under it -- the rangefinder test, readable while flying by hand.
+            under = stats.get("surface_below") or 0.0
+            parts.append(
+                f"height {altitude:.2f} m (true {self._true_altitude():.2f})"
+                + (f", over something {under:.2f} m tall" if under else ", over the floor")
+            )
 
         roofed = stats.get("roofed")
 
@@ -1185,6 +1219,29 @@ class DroneApp:
             parts.append("RECOGNISING LAST SESSION'S MAP...")
 
         self._text("   |   ".join(parts), (8, STATUS_TOP + 5), self.small, (175, 180, 190))
+
+    def _true_altitude(self):
+        """How high the drone's underside truly is above the FLOOR.
+
+        Not `world.altitude`: in the air that is measured from the nearest
+        navmesh surface in 3D, which beside a counter or a bed is the top of
+        the furniture, not the floor below -- it once read 0.18 m for a drone
+        a metre up. The floor here is the one the drone took off from.
+        """
+        centre = self.world.drone.object.translation
+        return max(0.0, float(centre.y) - float(self.world.drone.radius) - self.floor_height)
+
+    def _surface_below(self):
+        """True height above the floor of whatever is straight under the
+        drone -- for scoring the brain's height estimate, never sent to it."""
+        centre = self.world.drone.object.translation
+        down = first_hit(self.world.simulator, centre, mn.Vector3(0.0, -1.0, 0.0), 10.0,
+                         self.world.drone.object.object_id)
+
+        if down is None:
+            return None
+
+        return round(float(centre.y) - down - self.floor_height, 3)
 
     def _pose_error(self, state):
         if "pose" not in state or not self.alignment.ready:
@@ -1313,9 +1370,9 @@ class DroneApp:
             # The lenses sit at the centre of the sphere: its radius when it is
             # on the ground, plus however high it is flying.
             "lens_height_true": round(
-                float(self.drone_config["diameter"]) / 2.0 + float(self.world.altitude), 3
+                float(self.drone_config["diameter"]) / 2.0 + self._true_altitude(), 3
             ),
-            "altitude_true": round(float(self.world.altitude), 3),
+            "altitude_true": round(self._true_altitude(), 3),
             "lens_height_brain": state.get("stats", {}).get("lens_height"),
             "map_check": state.get("stats", {}).get("map_localize"),
             # "Stop." warnings said since the last score.

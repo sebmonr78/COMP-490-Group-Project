@@ -461,6 +461,70 @@ class Odometer:
         return self.total
 
 
+class Rangefinder:
+    """The down-facing distance sensor under the drone (config/rig.json).
+
+    Reports how far below it the nearest surface is: the floor, or the top of
+    whatever the drone is flying over. That is all it knows. It does not know
+    whether it is looking at the floor or a table -- telling those apart is
+    the brain's job (delta/brain/height.py).
+
+    An ultrasonic sensor answers with the first echo to come back, so the
+    reading is the NEAREST surface anywhere in its cone, not the one straight
+    below: the edge of a table registers before the drone is over it. The cone
+    is cast as seven rays, one straight down and six around its rim. Outside
+    2 cm to 4 m there is no answer at all, and the reading is None.
+
+    A simulation of a real sensor, not an oracle -- it reports a distance,
+    never an altitude.
+    """
+
+    def __init__(self, spec, simulator, seed=0):
+        self.below_lens = float(spec.get("below_lens", 0.10))
+        self.min_range = float(spec.get("min_range", 0.02))
+        self.max_range = float(spec.get("max_range", 4.0))
+        self.noise = float(spec.get("noise", 0.005))
+        self.simulator = simulator
+        self.rng = np.random.default_rng(seed)
+
+        half = math.radians(float(spec.get("cone_degrees", 15.0)) / 2.0)
+        self.directions = [mn.Vector3(0.0, -1.0, 0.0)] + [
+            mn.Vector3(math.sin(half) * math.cos(a), -math.cos(half), math.sin(half) * math.sin(a))
+            for a in np.linspace(0.0, 2.0 * math.pi, 6, endpoint=False)
+        ]
+
+    def read(self, drone):
+        """Metres from the sensor to the nearest surface below, or None."""
+        origin = drone.object.translation - mn.Vector3(0.0, self.below_lens, 0.0)
+        nearest = None
+
+        for direction in self.directions:
+            distance = first_hit(self.simulator, origin, direction, self.max_range, drone.object.object_id)
+
+            if distance is not None and (nearest is None or distance < nearest):
+                nearest = distance
+
+        if nearest is None or nearest < self.min_range:
+            return None
+
+        return nearest + float(self.rng.normal(0.0, self.noise))
+
+
+def first_hit(simulator, origin, direction, max_distance, ignore_object=None):
+    """Distance along a ray to the first thing it hits, or None.
+
+    Hits on `ignore_object` are skipped -- the drone's own sphere, which a
+    ray starting inside it would otherwise find first.
+    """
+    result = simulator.cast_ray(habitat_sim.geo.Ray(origin, direction), max_distance=max_distance)
+
+    for hit in result.hits if result.has_hits() else []:
+        if hit.object_id != ignore_object:
+            return float(hit.ray_distance) * direction.length()
+
+    return None
+
+
 class World:
     """Habitat with the drone in it, and the stereo rig on the drone.
 
