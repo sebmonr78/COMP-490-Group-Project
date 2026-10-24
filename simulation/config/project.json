@@ -22,6 +22,18 @@
   "drone": {
     "diameter": 0.3,
     "max_climb": 0.08,
-    "max_slope": 45.0
+    "max_slope": 45.0,
+    "navmesh_cell_size": 0.05,
+    "navmesh_cell_height": 0.02,
+    "_navmesh_cell_height": [
+      "Voxel height for building the drone's navmesh, in metres. Habitat's",
+      "default is 0.20, which is fine for a person and wrong for this robot:",
+      "Recast measures climb and clearance in whole voxels, so an 8 cm climb",
+      "rounded down to ZERO voxels and a 30 cm body rounded up to 40 cm. The",
+      "result was that a 2 cm rug became a wall -- measured, only 2 of 15",
+      "points on the nearest rug were on the navmesh, and the drone stopped",
+      "one radius short of its edge. At 0.02 the climb is 4 voxels, the",
+      "rug's edge is 1, and the body is exactly 15."
+    ]
   }
 }
