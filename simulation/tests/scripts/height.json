@@ -1,0 +1,37 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+
+  {"label": "on the ground"},
+  {"wait": 3},
+
+  {"label": "take off"},
+  {"fly": 0.6},
+
+  {"label": "hover"},
+  {"wait": 3},
+
+  {"label": "climb"},
+  {"fly": 1.0},
+
+  {"label": "turn to the table"},
+  {"turn": 110},
+
+  {"label": "fly over the table"},
+  {"walk": 4},
+
+  {"label": "turn back"},
+  {"turn": 180},
+
+  {"label": "fly back over it"},
+  {"walk": 4},
+
+  {"label": "descend"},
+  {"fly": 0.3},
+
+  {"label": "land"},
+  {"land": true},
+
+  {"label": "on the ground again"},
+  {"wait": 3},
+  {"quit": true}
+]

@@ -180,12 +180,19 @@
    "               centre IS the lens position, so the offset is zero and",
    "               the term would only add error.",
    "",
-   "While the drone flies, the sim sends its altitude each frame and the",
-   "brain adds it to lens_height -- otherwise every height in the map",
-   "would shift down by however high the drone had climbed."
+   "While the drone flies, the brain adds its altitude to lens_height --",
+   "otherwise every height in the map would shift down by however high",
+   "the drone had climbed. The altitude is its own, from the rangefinder",
+   "(delta/brain/height.py).",
+   "",
+   "  max_climb_speed  the fastest the motors climb or sink, m/s (drone.py",
+   "               CLIMB_SPEED). A rangefinder reading changing faster than",
+   "               that is the ground changing under the drone -- flying",
+   "               over a table edge -- not the drone moving."
   ],
   "diameter": 0.3,
   "radius": 0.15,
-  "lens_height": 0.15
+  "lens_height": 0.15,
+  "max_climb_speed": 0.8
  }
 }
