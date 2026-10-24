@@ -31,7 +31,6 @@ import magnum as mn
 from delta import rig as rig_module
 from delta import sim as world
 from delta.drone import CEILING_MARGIN, Drone, find_spot_near
-from delta.map_navigation import MapPlanner
 
 
 def build_world():
