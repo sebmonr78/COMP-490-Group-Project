@@ -1,0 +1,9 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+  {"wait": 3},
+  {"turn": 360},
+  {"roam": 3},
+  {"score": "ground_map"},
+  {"wait": 2},
+  {"quit": true}
+]

@@ -1,0 +1,50 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+
+  {"label": "still"},
+  {"wait": 5},
+
+  {"label": "rotate slow"},
+  {"turn": 360, "speed": 30},
+
+  {"label": "rotate normal"},
+  {"turn": -360},
+
+  {"label": "rotate fast"},
+  {"turn": 360, "speed": 120},
+
+  {"label": "roll forward"},
+  {"walk": 1.5},
+  {"turn": 180},
+  {"walk": 1.5},
+
+  {"label": "take off"},
+  {"fly": 0.6},
+
+  {"label": "hover"},
+  {"wait": 4},
+
+  {"label": "climb"},
+  {"fly": 1.2},
+
+  {"label": "rotate in air"},
+  {"turn": 360},
+
+  {"label": "fly forward"},
+  {"walk": 1.5},
+  {"turn": 180},
+  {"walk": 1.5},
+
+  {"label": "descend"},
+  {"fly": 0.3},
+
+  {"label": "land"},
+  {"land": true},
+
+  {"label": "after landing"},
+  {"wait": 4},
+
+  {"label": "end"},
+  {"wait": 1},
+  {"quit": true}
+]
