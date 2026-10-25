@@ -252,67 +252,6 @@ class FloorScale:
 
         return floor_drop(-(depth[mask] * vertical[mask]), self.lens_height)
 
-    def ceiling(self, depth_map, world_from_optical, low=0.3, high=4.0,
-                support=0.04):
-        """How far above the lens the ceiling is, in METRES, or None for none.
-
-        Searched from 0.3 m above the lens. The glasses searched from 0.8,
-        which suits a head 0.8 m under a 2.4 m ceiling; a drone flying 1.1 m
-        up under a 2 m ceiling has it 0.7 m overhead, found nothing, and
-        mapped the room it was flying in as outdoors.
-
-        The mirror of the floor finder, and it answers the one question the
-        map could not: is this spot indoors?
-
-        It works because the lens is wide. At 120 degrees the top of the frame
-        looks about 47 degrees upward, so a ceiling 2.4 m above the lens comes
-        into view roughly 2 m ahead -- a real surface at a constant height,
-        which is a sharp peak in a histogram of how far above the lens each
-        upward-looking pixel is. Under open sky there is no such surface:
-        Depth Anything will still return numbers for the sky, but they do not
-        agree on a height, so no peak clears the threshold and the answer is
-        None. That difference is the whole indoor/outdoor test.
-
-        Call it with depth already in metres, unlike the floor finder, which
-        runs before the scale is known and therefore works in whatever units
-        the depth arrived in.
-        """
-        depth = depth_map.depth
-        height, width = depth.shape
-
-        vertical = self._vertical_rays(depth_map, world_from_optical[:3, :3])
-
-        # Upward-looking pixels in the upper half, with a depth.
-        upper = np.zeros_like(depth, dtype=bool)
-        upper[: height // 2] = True
-
-        mask = upper & (vertical > 0.15) & (depth > 0.2)
-
-        if mask.sum() < 300:
-            return None
-
-        rises = depth[mask] * vertical[mask]
-        rises = rises[(rises > low) & (rises < high)]
-
-        if rises.size < 300:
-            return None
-
-        bins = np.linspace(low, high, 161)       # about 2 cm each
-        histogram, edges = np.histogram(rises, bins=bins)
-        histogram = np.convolve(histogram, np.ones(5) / 5.0, mode="same")
-
-        peak = int(np.argmax(histogram))
-        centre = 0.5 * (edges[peak] + edges[peak + 1])
-        near = np.abs(rises - centre) < 0.10
-
-        # A ceiling is a large flat thing. A doorframe, a lamp or a patch of
-        # sky that happens to agree is not, so a real share of the upward
-        # view has to land on it.
-        if near.sum() < max(300, support * mask.sum()):
-            return None
-
-        return float(np.median(rises[near]))
-
 
 def floor_drop(drops, expected=1.741):
     """The floor's distance below the lens, from many points' drops, or None.

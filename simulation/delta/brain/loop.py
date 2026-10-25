@@ -528,15 +528,6 @@ class Brain:
             depth_map.depth = depth_map.depth * scale
             depth_map.scale = scale
 
-            # Indoors or out? Measured, not assumed: a ceiling is a large
-            # flat surface at a constant height above the lens, and open sky
-            # is not. See FloorScale.ceiling. -1 means this view could not
-            # tell, which is different from "no roof".
-            overhead = self.floor.ceiling(
-                depth_map, frames.world_from_optical(tilted)
-            )
-            roofed = -1 if not floor_seen else int(overhead is not None)
-
             scan = occupancy.make_scan(
                 depth_map.depth,
                 depth_map.K,
@@ -550,7 +541,6 @@ class Brain:
                 # On the ground the drone's own footprint is known free. In
                 # the air it is not: there may be nothing under it at all.
                 footprint_free=altitude < 0.05,
-                roofed=roofed,
             )
 
             with self.lock:
@@ -674,7 +664,7 @@ class Brain:
             except Closed:
                 return
 
-    def _split_rooms(self, classes, walls, roof, corner, resolution):
+    def _split_rooms(self, classes, walls, corner, resolution):
         """Cut the map into rooms (rooms.py) and keep the answer to publish.
 
         The rooms carry their own origin: the grid's window grows between
@@ -683,7 +673,7 @@ class Brain:
         self._rooms_at = time.monotonic()
         started = time.monotonic()
 
-        found = rooms_module.segment(classes, walls, roof, resolution, self.settings.rooms)
+        found = rooms_module.segment(classes, walls, resolution, self.settings.rooms)
 
         def world(col, row):
             return [float(corner[0] + col * resolution), float(corner[1] + row * resolution)]
@@ -695,9 +685,6 @@ class Brain:
             "list": [
                 {
                     "id": room.id, "area": round(room.area, 1), "xy": world(*room.point),
-                    "kind": room.kind,
-                    "roofed": None if room.roofed is None else round(room.roofed, 2),
-                    "enclosed": round(room.enclosed, 2),
                 }
                 for room in found.rooms
             ],
@@ -710,20 +697,6 @@ class Brain:
         labels = found.labels.astype(np.uint8 if found.labels.max() < 256 else np.uint16)
         self._rooms = (fields, labels)
         self.timing.update(rooms=(time.monotonic() - started) * 1000.0)
-
-    def _roof_counts(self):
-        """How many mapped cells are indoors and outdoors, for the status bar."""
-        if self.grid is None:
-            return None
-
-        from delta.brain.occupancy import ROOFED, UNROOFED
-
-        roof = self.grid.roof_classes()
-
-        return {
-            "indoor": int((roof == ROOFED).sum()),
-            "outdoor": int((roof == UNROOFED).sum()),
-        }
 
     def _snapshot(self):
         fields = {"epoch": self.epoch}
@@ -757,13 +730,12 @@ class Brain:
                     r0, r1, c0, c1 = bounds
 
                     arrays["grid"] = self.grid.classes()[r0:r1, c0:c1]
-                    arrays["roof"] = self.grid.roof_classes()[r0:r1, c0:c1]
 
                     # A copy for splitting into rooms, outside the lock.
                     if time.monotonic() - self._rooms_at >= float(self.settings.rooms.every_seconds):
                         plan = (
                             arrays["grid"], self.grid.wall_cells()[r0:r1, c0:c1].copy(),
-                            arrays["roof"], self.grid.to_world([c0, r0]), self.grid.resolution,
+                            self.grid.to_world([c0, r0]), self.grid.resolution,
                         )
 
                     # What the drone could DO in each cell -- roll across,
@@ -825,7 +797,6 @@ class Brain:
             ),
             "sources": {"pose": self.pose_source, "depth": self.depth_source},
             "relocalizing": self.saved_root_map is not None,
-            "roofed": self._roof_counts(),
         }
 
         return fields, arrays

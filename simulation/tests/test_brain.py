@@ -26,8 +26,8 @@ what the second test prevents.
 
 THE PARTS MUST WORK. The rest are unit tests, most of them regressions for
 bugs that cost real time: a floor finder that silently found nothing, a
-ceiling test that is the whole indoor/outdoor answer, and a map that has to
-survive a loop closure.
+height that took a table for the floor, rooms cut up by their furniture,
+and a map that has to survive a loop closure.
 """
 
 import ast
@@ -45,7 +45,7 @@ import numpy as np
 from delta.brain import config as brain_config
 from delta.brain import depth as depth_module
 from delta.brain import occupancy
-from delta.brain.occupancy import FREE, OCCUPIED, ROOFED, UNKNOWN, UNROOFED
+from delta.brain.occupancy import FREE, OCCUPIED, UNKNOWN
 
 
 # ---------------------------------------------------------------------
@@ -375,55 +375,6 @@ def a_wrong_scale_is_refused():
 
 
 # ---------------------------------------------------------------------
-# Indoors or out
-# ---------------------------------------------------------------------
-
-
-def a_ceiling_is_measured():
-    # 0.7 m: flying 1.1 m up under a 2 m ceiling, which once read as outdoors.
-    for height in (0.7, 1.6, 2.35, 3.0):
-        scale = depth_module.FloorScale(0.15)
-        got = scale.ceiling(_room(0.15, ceiling=height), LEVEL)
-
-        assert got is not None, f"no ceiling found at {height} m"
-        assert abs(got - height) < 0.05, f"ceiling {height} m measured as {got:.2f}"
-
-    return "ceilings at 0.7, 1.6, 2.35 and 3.0 m, all within 5 cm"
-
-
-def open_sky_is_not_a_ceiling():
-    """The whole indoor/outdoor answer. Depth Anything returns numbers for
-    the sky as happily as for plaster; what it cannot do is make them agree
-    on a height."""
-    scale = depth_module.FloorScale(0.15)
-
-    assert scale.ceiling(_room(0.15, ceiling=None), LEVEL) is None, (
-        "open sky was mistaken for a ceiling"
-    )
-
-    return "open sky gives no ceiling"
-
-
-def the_roof_layer_needs_more_than_one_look():
-    """A cell must not flip indoors on a single glimpse of a doorframe."""
-    settings = brain_config.load().occupancy
-    grid = occupancy.OccupancyGrid(settings, (0.0, 0.0))
-
-    cell = (300, 300)
-
-    grid.roof[cell] = grid.roof_hit                 # one view
-    assert grid.roof_classes()[cell] == UNKNOWN, "one view decided it"
-
-    grid.roof[cell] = 3 * grid.roof_hit             # three views
-    assert grid.roof_classes()[cell] == ROOFED, "three views did not decide it"
-
-    grid.roof[cell] = 3 * grid.roof_miss            # and back out again
-    assert grid.roof_classes()[cell] == UNROOFED, "driving outside did not register"
-
-    return "one view is not enough; three are, either way"
-
-
-# ---------------------------------------------------------------------
 # The map
 # ---------------------------------------------------------------------
 
@@ -434,11 +385,10 @@ def a_scan_marks_floor_free_and_walls_solid():
 
     scan = occupancy.make_scan(
         room.depth, room.K, 0.15, settings,
-        footprint=(0.0, 0.0, 0.15), roofed=1,
+        footprint=(0.0, 0.0, 0.15),
     )
 
     assert len(scan.free) >= 3, "a view of a floor produced no free area"
-    assert scan.roofed == 1, "the scan forgot what was overhead"
 
     grid = occupancy.OccupancyGrid(settings, (0.0, 0.0))
     grid.add(scan, np.eye(4))
@@ -446,17 +396,6 @@ def a_scan_marks_floor_free_and_walls_solid():
     classes = grid.classes()
 
     assert (classes == FREE).sum() > 0, "nothing was marked free"
-    assert (grid.roof_classes() == ROOFED).sum() == 0, (
-        "one scan should not be enough to call anywhere indoors"
-    )
-
-    for _ in range(3):
-        grid.add(scan, np.eye(4))
-
-    assert (grid.roof_classes() == ROOFED).sum() > 0, (
-        "four views of a ceiling did not mark anywhere indoors"
-    )
-
     return f"{int((classes == FREE).sum())} cells free after one scan"
 
 
@@ -671,15 +610,14 @@ def a_surface_that_slides_out_of_the_cone_is_forgotten():
 
 
 def _plan(width_m, height_m, resolution=0.05):
-    """An empty floor plan: everything unexplored, no walls, no roof answer."""
+    """An empty floor plan: everything unexplored, no walls."""
     shape = (int(round(height_m / resolution)), int(round(width_m / resolution)))
-    return np.zeros(shape, np.uint8), np.zeros(shape, bool), np.zeros(shape, np.uint8)
+    return np.zeros(shape, np.uint8), np.zeros(shape, bool)
 
 
-def _room_box(classes, walls, roof, col0, row0, col1, row1, roofed=True, wall=True):
+def _room_box(classes, walls, col0, row0, col1, row1, wall=True):
     """Seen floor from (col0, row0) to (col1, row1), walled all round (2 cells)."""
     classes[row0:row1, col0:col1] = FREE
-    roof[row0:row1, col0:col1] = ROOFED if roofed else UNROOFED
 
     if wall:
         walls[row0 - 2:row0, col0 - 2:col1 + 2] = True
@@ -693,21 +631,19 @@ def two_rooms_are_split_at_their_door():
     from delta.brain import rooms as rooms_module
 
     settings = brain_config.load().rooms
-    classes, walls, roof = _plan(10.0, 6.0)
-    _room_box(classes, walls, roof, 10, 10, 90, 90)
-    _room_box(classes, walls, roof, 92, 10, 172, 90)
+    classes, walls = _plan(10.0, 6.0)
+    _room_box(classes, walls, 10, 10, 90, 90)
+    _room_box(classes, walls, 92, 10, 172, 90)
 
     # The door: 18 cells (0.9 m) through the shared wall, seen as floor.
     walls[41:59, 90:92] = False
     classes[41:59, 90:92] = FREE
-    roof[41:59, 90:92] = ROOFED
 
-    found = rooms_module.segment(classes, walls, roof, 0.05, settings)
+    found = rooms_module.segment(classes, walls, 0.05, settings)
 
     assert len(found.rooms) == 2, f"{len(found.rooms)} rooms, not 2"
     assert len(found.doors) == 1, f"{len(found.doors)} doors, not 1"
     assert abs(found.doors[0].width - 0.9) < 0.2, f"the door is {found.doors[0].width:.2f} m wide, not 0.9"
-    assert all(room.kind == "indoor" for room in found.rooms), [room.kind for room in found.rooms]
     assert all(abs(room.area - 16.0) < 1.5 for room in found.rooms), [round(room.area, 1) for room in found.rooms]
 
     return f"2 rooms of {found.rooms[0].area:.1f} and {found.rooms[1].area:.1f} m2, a {found.doors[0].width:.2f} m door"
@@ -719,12 +655,12 @@ def furniture_does_not_split_a_room():
     from delta.brain import rooms as rooms_module
 
     settings = brain_config.load().rooms
-    classes, walls, roof = _plan(8.0, 6.0)
-    _room_box(classes, walls, roof, 10, 10, 130, 90)
+    classes, walls = _plan(8.0, 6.0)
+    _room_box(classes, walls, 10, 10, 130, 90)
 
     classes[45:55, 20:120] = OCCUPIED            # a 5 m sofa, 0.5 m deep
 
-    found = rooms_module.segment(classes, walls, roof, 0.05, settings)
+    found = rooms_module.segment(classes, walls, 0.05, settings)
 
     assert len(found.rooms) == 1, f"the sofa split the room into {len(found.rooms)}"
 
@@ -736,57 +672,18 @@ def an_open_plan_kitchen_is_one_room_with_the_living_room():
     from delta.brain import rooms as rooms_module
 
     settings = brain_config.load().rooms
-    classes, walls, roof = _plan(10.0, 6.0)
-    _room_box(classes, walls, roof, 10, 10, 90, 90)
-    _room_box(classes, walls, roof, 92, 10, 172, 90)
+    classes, walls = _plan(10.0, 6.0)
+    _room_box(classes, walls, 10, 10, 90, 90)
+    _room_box(classes, walls, 92, 10, 172, 90)
 
     walls[25:75, 90:92] = False
     classes[25:75, 90:92] = FREE
-    roof[25:75, 90:92] = ROOFED
 
-    found = rooms_module.segment(classes, walls, roof, 0.05, settings)
+    found = rooms_module.segment(classes, walls, 0.05, settings)
 
     assert len(found.rooms) == 1, f"{len(found.rooms)} rooms across a 2.5 m opening"
 
     return f"one room of {found.rooms[0].area:.1f} m2 across a 2.5 m opening"
-
-
-def indoors_outdoors_and_in_between():
-    """The ceiling decides, the walls stand in when there is no ceiling to
-    go by:
-        walled garden    walls, open sky             outdoor
-        glass-walled     ceiling, walls not seen     indoor
-        patio + lawn     half ceiling, half sky      mixed
-        no ceiling seen  walls all round             indoor
-        nothing seen     no walls, no ceiling        unsure"""
-    from delta.brain import rooms as rooms_module
-
-    settings = brain_config.load().rooms
-
-    def one(roofed=True, wall=True, half=False, roof_known=True):
-        classes, walls, roof = _plan(6.0, 6.0)
-        _room_box(classes, walls, roof, 10, 10, 100, 100, roofed=roofed, wall=wall)
-
-        if half:
-            roof[10:100, 55:100] = UNROOFED
-
-        if not roof_known:
-            roof[:] = 0
-
-        return rooms_module.segment(classes, walls, roof, 0.05, settings).rooms[0].kind
-
-    kinds = (
-        one(roofed=False),
-        one(wall=False),
-        one(wall=False, half=True),
-        one(roof_known=False),
-        one(wall=False, roof_known=False),
-    )
-
-    expected = ("outdoor", "indoor", "mixed", "indoor", "unsure")
-    assert kinds == expected, f"came out {kinds}, expected {expected}"
-
-    return "walled garden outdoor, glass room indoor, patio mixed, walls-only indoor, nothing unsure"
 
 
 TESTS = [
@@ -798,9 +695,6 @@ TESTS = [
     the_floor_is_found_at_a_drone_height,
     the_floor_is_still_found_at_a_head_height,
     a_wrong_scale_is_refused,
-    a_ceiling_is_measured,
-    open_sky_is_not_a_ceiling,
-    the_roof_layer_needs_more_than_one_look,
     a_scan_marks_floor_free_and_walls_solid,
     a_flying_drone_does_not_clear_the_floor_beneath_it,
     a_loop_closure_redraws_the_map,
@@ -811,7 +705,6 @@ TESTS = [
     two_rooms_are_split_at_their_door,
     furniture_does_not_split_a_room,
     an_open_plan_kitchen_is_one_room_with_the_living_room,
-    indoors_outdoors_and_in_between,
 ]
 
 

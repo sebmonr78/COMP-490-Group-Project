@@ -124,26 +124,6 @@
    10.0
   ],
   "_keyframe_spacing": "metres and degrees of movement before another view is kept for redrawing the map",
-  "roof": {
-   "_comment": [
-    "Is this cell under cover? Log-odds, exactly like the occupancy",
-    "evidence beside it, and for the same reason: one glimpse of a",
-    "doorframe must not turn a garden into a room, and driving out",
-    "through a door has to be able to change the answer back.",
-    "",
-    "Weaker than the occupancy evidence on purpose. A missed obstacle",
-    "is a collision; a cell wrongly called indoors is a label on a map.",
-    "So it needs two or three agreeing views either way to commit."
-   ],
-   "hit": 0.4,
-   "miss": -0.4,
-   "limits": [
-    -2.5,
-    2.5
-   ],
-   "roofed_above": 0.8,
-   "unroofed_below": -0.8
-  },
   "walls": {
    "_comment": [
     "The floor plan, for splitting the map into rooms (rooms.py): is",
@@ -173,17 +153,12 @@
    "free space is shrunk until it splits at openings up to this wide; a",
    "wider gap -- an open-plan kitchen into a living room -- joins.",
    "min_room: pieces smaller than this, m2, are merged into a neighbour.",
-   "every_seconds: how often to re-split. The map changes slowly.",
-   "indoor: a room is indoors when this share of its floor has been seen",
-   "under a ceiling, and enclosed when this share of its edge is wall",
-   "rather than unexplored."
+   "every_seconds: how often to re-split. The map changes slowly."
   ],
   "door_width": 1.2,
   "max_room_width": 4.0,
   "min_room": 2.0,
-  "every_seconds": 2.0,
-  "indoor": 0.6,
-  "enclosed": 0.6
+  "every_seconds": 2.0
  },
  "navigation": {
   "clearance": 0.25,

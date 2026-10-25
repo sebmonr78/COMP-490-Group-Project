@@ -34,9 +34,6 @@ from delta import frames
 
 UNKNOWN, FREE, OCCUPIED = 0, 1, 2
 
-# What the roof layer answers: whether a cell is under cover.
-UNROOFED, ROOFED = 1, 2
-
 # How far obstacles are mapped from a frame whose scale was borrowed.
 BORROWED_RANGE = 1.0
 
@@ -50,11 +47,6 @@ class Scan:
     free: np.ndarray                # P x 2 polygon, metres
     hits: np.ndarray                # H x 2 points, metres
     footprint: np.ndarray           # (x, y, radius) of the robot's body
-
-    # What this view saw overhead: 1 a ceiling, 0 open sky, -1 no opinion.
-    # The floor this view could see is under whatever is above the camera,
-    # so one answer covers the whole free polygon.
-    roofed: int = -1
 
     # Floor-plan points of everything WALL-HIGH (settings.walls.band, about
     # 0.9 to 1.8 m up): walls, doors' frames, tall cupboards -- not tables,
@@ -71,7 +63,7 @@ class Scan:
 
 def make_scan(depth, K, lens_height, settings, footprint, anchor=0,
               anchor_from_base=None, step=2, free_space=True, tilt=None,
-              footprint_free=True, roofed=-1):
+              footprint_free=True):
     """Turn one metric depth map into a Scan.
 
     `depth` is planar depth in metres (already scale-corrected) and K its
@@ -182,7 +174,6 @@ def make_scan(depth, K, lens_height, settings, footprint, anchor=0,
         free=polygon,
         hits=hits,
         footprint=body,
-        roofed=int(roofed),
         walls=walls,
     )
 
@@ -196,13 +187,6 @@ class OccupancyGrid:
         cells = int(round(float(settings.size) / self.resolution))
 
         self.logodds = np.zeros((cells, cells), np.float32)
-
-        # A second layer of evidence, in the same cells: is this spot under
-        # cover? Log-odds for the same reason the occupancy is -- one frame
-        # that glimpsed a doorframe must not turn a garden into a room, and
-        # the robot driving out through a door must be able to change the
-        # answer back.
-        self.roof = np.zeros((cells, cells), np.float32)
         self.origin = np.array(centre_xy, dtype=np.float64) - cells * self.resolution / 2.0
 
         self.hit = float(settings.hit)
@@ -211,14 +195,7 @@ class OccupancyGrid:
         self.occupied_above = float(settings.occupied_above)
         self.free_below = float(settings.free_below)
 
-        roof = settings.get("roof", {}) if hasattr(settings, "get") else {}
-        self.roof_hit = float(roof.get("hit", 0.4))
-        self.roof_miss = float(roof.get("miss", -0.4))
-        self.roof_limits = tuple(roof.get("limits", (-2.5, 2.5)))
-        self.roofed_above = float(roof.get("roofed_above", 0.8))
-        self.unroofed_below = float(roof.get("unroofed_below", -0.8))
-
-        # A third: is there something WALL-HIGH here? The floor plan, for
+        # A second layer, in the same cells: is there something WALL-HIGH here? The floor plan, for
         # telling rooms apart (rooms.py). Seen floor votes against a wall
         # (a wall reaches the floor), a wall-high point votes for one.
         walls = settings.get("walls", {}) if hasattr(settings, "get") else {}
@@ -269,7 +246,6 @@ class OccupancyGrid:
     def rebuild(self, node_poses):
         """Redraw everything from the kept scans, at their current poses."""
         self.logodds[:] = 0.0
-        self.roof[:] = 0.0
         self.walls[:] = 0.0
 
         for scan in self.scans:
@@ -321,15 +297,6 @@ class OccupancyGrid:
             window[seen] += self.miss
             np.clip(window, *self.limits, out=window)
 
-            # The floor this view could see lies under whatever the view saw
-            # overhead, so the same area gets the roof vote. A view with no
-            # opinion -- too few upward pixels to tell -- votes for nothing,
-            # which is different from voting for open sky.
-            if scan.roofed >= 0:
-                roof = self.roof[r0:r1, c0:c1]
-                roof[seen] += self.roof_hit if scan.roofed else self.roof_miss
-                np.clip(roof, *self.roof_limits, out=roof)
-
             # Floor seen here: no wall stands on it.
             walls = self.walls[r0:r1, c0:c1]
             walls[seen] += self.wall_miss
@@ -361,17 +328,6 @@ class OccupancyGrid:
         out = np.full(self.logodds.shape, UNKNOWN, np.uint8)
         out[self.logodds < self.free_below] = FREE
         out[self.logodds > self.occupied_above] = OCCUPIED
-        return out
-
-    def roof_classes(self):
-        """UNKNOWN, UNROOFED or ROOFED for every cell.
-
-        This is the house-versus-garden answer, and the drone worked it out
-        for itself: nothing here came from the simulator.
-        """
-        out = np.full(self.roof.shape, UNKNOWN, np.uint8)
-        out[self.roof < self.unroofed_below] = UNROOFED
-        out[self.roof > self.roofed_above] = ROOFED
         return out
 
     def wall_cells(self):
@@ -422,10 +378,8 @@ class OccupancyGrid:
         np.savez_compressed(
             path,
             logodds=self.logodds,
-            roof=self.roof,
             walls_layer=self.walls,
             walls=walls, wall_lengths=wall_lengths,
-            roofed=np.array([s.roofed for s in self.scans], dtype=np.int64),
             origin=self.origin,
             resolution=self.resolution,
             anchors=np.array([s.anchor for s in self.scans], dtype=np.int64),
@@ -444,19 +398,8 @@ class OccupancyGrid:
         self.logodds[:] = data["logodds"]
         self.origin = data["origin"]
 
-        # Maps saved before the roof layer existed simply have no opinion.
-        if "roof" in data:
-            self.roof[:] = data["roof"]
-        else:
-            self.roof[:] = 0.0
-
         free = np.split(data["free"], np.cumsum(data["free_lengths"])[:-1])
         hits = np.split(data["hits"], np.cumsum(data["hit_lengths"])[:-1])
-
-        roofed = (
-            data["roofed"] if "roofed" in data
-            else np.full(len(data["anchors"]), -1, dtype=np.int64)
-        )
 
         # Maps saved before the walls layer existed have no wall points.
         if "walls" in data:
@@ -467,10 +410,10 @@ class OccupancyGrid:
             walls = [None] * len(data["anchors"])
 
         self.scans = [
-            Scan(int(anchor), pose, f, h, footprint, int(roof), w)
-            for anchor, pose, f, h, footprint, roof, w in zip(
+            Scan(int(anchor), pose, f, h, footprint, w)
+            for anchor, pose, f, h, footprint, w in zip(
                 data["anchors"], data["anchor_from_base"], free, hits,
-                data["footprints"], roofed, walls,
+                data["footprints"], walls,
             )
         ]
 

@@ -473,7 +473,8 @@ in a ball.
 two camera images, IMU, axle encoder
    -> localize.py    RTAB-Map: where am I; loop closures correct the past
    -> depth.py       Depth Anything 3, scaled from the floor
-   -> occupancy.py   the map at rolling height, and indoors vs outdoors
+   -> occupancy.py   the map at rolling height, and a wall-high floor plan
+   -> rooms.py       the floor plan split into rooms at the doors
    -> planner.py     routes on that map
 ```
 
@@ -507,8 +508,9 @@ centimetres at most. Descending to land is the weakest motion.
 A grid of 5 cm squares, built only from what the drone has seen. An obstacle
 is anything 8 to 38 cm above the floor -- the drone's own height, plus a
 margin -- because this is the map of where it can **roll**. Free floor is
-floor it actually saw. A second layer records whether each square is under a
-roof, which is how it tells the house from the garden.
+floor it actually saw. A second layer records what is wall-high (0.9 to
+1.8 m up) -- walls and tall cupboards, not furniture -- and `rooms.py` splits
+that floor plan into rooms at the doors.
 
 ### Measuring it
 

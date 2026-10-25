@@ -105,13 +105,6 @@ KIND_COLOURS = {
 
 FREE_COLOUR = np.array([78, 92, 110], np.uint8)
 OCCUPIED_COLOUR = np.array([235, 232, 220], np.uint8)
-
-# Free floor the drone worked out is OUTSIDE -- nothing overhead. Olive, so
-# it reads as ground rather than as another room, and so that the boundary
-# between the two is visible at a glance: that line is the building's wall,
-# found by the drone rather than given to it.
-OUTDOOR_COLOUR = np.array([86, 96, 58], np.uint8)
-OUTDOOR_WALL_COLOUR = np.array([150, 160, 110], np.uint8)
 TRUTH_FLOOR = np.array([34, 40, 50], np.uint8)
 TRUTH_EDGE = np.array([70, 78, 94], np.uint8)
 
@@ -1148,16 +1141,7 @@ class DroneApp:
             colours[grid == 1] = FREE_COLOUR
             colours[grid == 2] = OCCUPIED_COLOUR
 
-            # Cells the drone decided are open to the sky. UNROOFED is 1 in
-            # occupancy.py; cells it has no opinion on keep the indoor
-            # colours, because "not yet established" is not "outside".
-            roof = arrays.get("roof")
-
-            if roof is not None and roof.shape == grid.shape:
-                outside = roof == 1
-                colours[(grid == 1) & outside] = OUTDOOR_COLOUR
-                colours[(grid == 2) & outside] = OUTDOOR_WALL_COLOUR
-            mask = cv2.warpAffine((grid > 0).astype(np.uint8), affine, (800, TOP), flags=cv2.INTER_NEAREST)
+            mask =cv2.warpAffine((grid > 0).astype(np.uint8), affine, (800, TOP), flags=cv2.INTER_NEAREST)
             warped = cv2.warpAffine(colours, affine, (800, TOP), flags=cv2.INTER_NEAREST)
             canvas[mask > 0] = warped[mask > 0]
 
@@ -1210,7 +1194,7 @@ class DroneApp:
 
                 for room in state["rooms"]["list"]:
                     p = np.array(self.to_panel(self.alignment.point(room["xy"]))) + offset
-                    self._text(f"{room['id']}  {room['kind']}  {room['area']:.0f} m2",
+                    self._text(f"room {room['id']}  {room['area']:.0f} m2",
                                p - (30, 7), self.small, (250, 250, 250))
 
             if "pose" in state:
@@ -1232,7 +1216,7 @@ class DroneApp:
 
         self._text("What the drone believes", (812, 10), self.big, (240, 240, 240))
         self._text("green: really here   orange: believed here   "
-                   "olive: the drone worked out this is outdoors   "
+                   "white: occupied   "
                    "M: true layout "
                    + ("on" if self.show_truth else "off")
                    + "   N: rooms " + ("on" if self.show_rooms else "off"),
@@ -1347,13 +1331,6 @@ class DroneApp:
         ]
 
         self._draw_height(stats)
-
-        roofed = stats.get("roofed")
-
-        if roofed:
-            parts.append(
-                f"mapped {roofed['indoor']} indoor / {roofed['outdoor']} outdoor cells"
-            )
 
         if sources.get("pose") == "rtabmap":
             parts.append(f"RTAB-Map {loc.get('ms', 0):.0f} ms, nodes {loc.get('nodes', 0)}, "
@@ -1515,8 +1492,6 @@ class DroneApp:
                         brain room -- 1.0 if no room was cut in pieces
             precision   per brain room, the share of it in ONE true room --
                         1.0 if no two rooms were run together
-            indoor      per brain room that said indoor or outdoor, right
-                        or wrong against the true room it mostly lies in
 
         The measures of Bormann et al.'s survey, on the part of the house
         that was explored. Appends to outputs/eval/rooms.jsonl and saves a
@@ -1771,11 +1746,11 @@ class DroneApp:
 
 
 def _room_scores(brain, truth, names, kinds):
-    """Recall, precision and indoor-or-out of the brain's rooms against one
+    """Recall and precision of the brain's rooms against one
     truth picture (see DroneApp.score_rooms). `names` maps a truth id to its
     name; `kinds` the brain's room id to its published description."""
     mapped = brain > 0
-    recalls, precisions, judged, right, rows = [], [], 0, 0, []
+    recalls, precisions, rows = [], [], []
 
     for g in np.unique(truth[truth > 0]):
         inside = truth == g
@@ -1796,21 +1771,12 @@ def _room_scores(brain, truth, names, kinds):
         best = int(values[counts.argmax()])
         share = counts.max() / labelled.sum()
         precisions.append(share)
-
-        really = "outdoor" if "outdoor" in (names.get(best) or "") else "indoor"
-        said = {"indoor": "indoor", "outdoor": "outdoor", "covered": "outdoor"}.get(room["kind"])
-
-        if said is not None:
-            judged += 1
-            right += said == really
-
-        rows.append(f"{b}: {room['kind']} {room['area']} m2 -> {names.get(best)} ({share:.0%})")
+        rows.append(f"{b}: {room['area']} m2 -> {names.get(best)} ({share:.0%})")
 
     return {
         "rooms_true_explored": len(recalls),
         "recall": round(float(np.mean(recalls)), 3) if recalls else None,
         "precision": round(float(np.mean(precisions)), 3) if precisions else None,
-        "indoor_right": f"{right}/{judged}",
         "rooms": rows,
     }
 

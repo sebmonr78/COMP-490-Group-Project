@@ -9,8 +9,8 @@ implementation, and analysis", ICRA 2016):
        from a wall): rooms come apart at their doors, because a doorway is
        narrow and a room is not. The shrink that gives the MOST separate
        pieces is the one that split every door without erasing rooms
-    3. those pieces are the rooms' seeds; grow each back over the floor,
-       one ring at a time, until every cell belongs to the nearest seed
+    3. those pieces are the rooms' seeds; flood each back over the floor
+       from the middle outwards, so that two rooms meet at their doorway
 
 Two things the survey's clean floor plans did not need, and a robot's map
 does:
@@ -25,24 +25,6 @@ does:
     one kitchen otherwise -- and a piece smaller than a room joins its
     neighbour. What is left between rooms are the doors.
 
-Indoors or out is decided per room, from two pieces of evidence:
-
-    roofed    the share of its floor seen under a ceiling (occupancy.roof)
-    enclosed  the share of its outer edge that is wall rather than unexplored
-
-The ceiling decides; the walls are only the fallback when no ceiling has
-been seen. Measured, not assumed: the default house's open-plan living room
-was 100% roofed but only 46% enclosed, because its long glass wall is
-invisible to depth -- the cameras see straight through it -- and the rest
-of its edge had not been explored yet. Walls alone would have put it
-outdoors. So:
-
-    mostly roofed                    indoor     (a room; a walled garden is not)
-    mostly open sky                  outdoor    (a garden, walled or not)
-    some of each                     mixed      (a patio and the lawn it opens onto)
-    no ceiling seen, walls all round indoor
-    no ceiling seen, no walls seen   unsure
-
 Nothing here reads the simulator: it is the brain's own map, cut up.
 """
 
@@ -51,7 +33,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from delta.brain.occupancy import ROOFED, UNKNOWN, UNROOFED
+from delta.brain.occupancy import UNKNOWN
 
 # How finely the shrink is swept, and from where, in metres.
 SWEEP_STEP = 0.05
@@ -68,9 +50,6 @@ class Room:
     cells: int
     area: float                      # m2
     point: tuple                     # (col, row): the cell furthest from its walls
-    roofed: float = None             # share of the floor seen under a ceiling
-    enclosed: float = None           # share of the edge that is wall
-    kind: str = "unsure"             # indoor, outdoor, mixed, unsure
 
 
 @dataclass
@@ -103,11 +82,11 @@ def floor_plan(classes, walls):
     return closed & ~walls
 
 
-def segment(classes, walls, roof, resolution, settings):
+def segment(classes, walls, resolution, settings):
     """Split the brain's map into rooms. All arrays are the same window.
 
-    `classes` is occupancy.classes(), `walls` occupancy.wall_cells(), `roof`
-    occupancy.roof_classes(). Returns a Rooms.
+    `classes` is occupancy.classes(), `walls` occupancy.wall_cells().
+    Returns a Rooms.
     """
     space = floor_plan(classes, walls)
     labels = np.zeros(space.shape, np.uint16)
@@ -124,7 +103,7 @@ def segment(classes, walls, roof, resolution, settings):
     labels = _grow(seeds, space, distance)
     labels = _merge(labels, resolution, settings)
 
-    rooms = _describe(labels, distance, walls, classes, roof, resolution, settings)
+    rooms = _describe(labels, distance, resolution)
     doors = _doors(labels, resolution)
 
     return Rooms(labels, rooms, doors, shrink)
@@ -274,10 +253,8 @@ def _merge(labels, resolution, settings):
     return renumbered
 
 
-def _describe(labels, distance, walls, classes, roof, resolution, settings):
+def _describe(labels, distance, resolution):
     rooms = []
-    outside = ~(labels > 0)
-    wall_or_unknown = walls | (classes == UNKNOWN)
 
     for i in range(1, int(labels.max()) + 1):
         mine = labels == i
@@ -290,54 +267,9 @@ def _describe(labels, distance, walls, classes, roof, resolution, settings):
         inside = np.where(mine, distance, -1.0)
         row, col = np.unravel_index(int(np.argmax(inside)), inside.shape)
 
-        # Under a ceiling?
-        known = mine & (roof != UNKNOWN)
-        roofed = float((mine & (roof == ROOFED)).sum() / known.sum()) if known.sum() > 0.2 * cells else None
-
-        # Its edge: cells just outside it. Wall, or unexplored? (Other
-        # rooms, through doors, are neither and do not count.) Only the
-        # OUTER edge: a pocket nobody has seen into inside the room -- under
-        # a sofa, behind the island -- is not a way out of it, and counting
-        # those called a whole kitchen and living room "covered".
-        filled = _fill_holes(mine)
-        ring = (cv2.dilate(filled.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
-                & ~filled & outside & wall_or_unknown)
-        wall_edge = int((ring & walls).sum())
-        open_edge = int((ring & ~walls).sum())
-        enclosed = wall_edge / max(1, wall_edge + open_edge)
-
-        rooms.append(Room(
-            id=i, cells=cells, area=cells * resolution ** 2, point=(int(col), int(row)),
-            roofed=roofed, enclosed=enclosed,
-            kind=_kind(roofed, enclosed, settings),
-        ))
+        rooms.append(Room(id=i, cells=cells, area=cells * resolution ** 2, point=(int(col), int(row))))
 
     return rooms
-
-
-def _fill_holes(mask):
-    """The mask with every hole inside it filled: its outer outline."""
-    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    filled = np.zeros(mask.shape, np.uint8)
-    cv2.drawContours(filled, contours, -1, 1, thickness=cv2.FILLED)
-
-    return filled.astype(bool)
-
-
-def _kind(roofed, enclosed, settings):
-    """indoor, outdoor, mixed or unsure -- see the module's docstring."""
-    indoor, walled = float(settings.indoor), float(settings.enclosed)
-
-    if roofed is None:
-        return "indoor" if enclosed >= walled else "unsure"
-
-    if roofed >= indoor:
-        return "indoor"
-
-    if roofed <= 1.0 - indoor:
-        return "outdoor"
-
-    return "mixed"
 
 
 def _doors(labels, resolution):
