@@ -73,6 +73,11 @@ TOP = 560
 STRIP_TOP = 566
 STATUS_TOP = 934
 
+# The log panel, bottom right, and the height box at the top of it.
+LOG_LEFT = 1050
+HEIGHT_BOX_TOP = STRIP_TOP + 24
+HEIGHT_BOX_HEIGHT = 110
+
 # A 30 cm drone, not a walking adult. Slower, because the tracker matches
 # features BETWEEN frames: at 1 m/s and 10 frames a second it moves 10 cm,
 # which is about as far as ORB can bridge in this house.
@@ -90,6 +95,8 @@ CHASE_UP_FLYING = 0.5               # ... and in the air
 CHASE_MARGIN = 0.2                  # stop this far short of a wall
 CHASE_NEAREST = 0.45                # never closer than this to the drone
 CHASE_PITCH = -22.0                 # the free camera's starting tilt
+
+TILT_SPEED = 45.0                   # degrees a second, holding I or K
 
 KIND_COLOURS = {
     "reply": (110, 210, 255),
@@ -526,6 +533,9 @@ class DroneApp:
             self.show_truth = not self.show_truth
         elif key == pygame.K_F12:
             self.screenshot()
+        elif key == pygame.K_o and not self.free_camera:
+            self.world.drone.pitch = 0.0
+            self.note("Cameras level.")
 
     def command(self, name, said, **fields):
         self.note(said)
@@ -579,6 +589,10 @@ class DroneApp:
 
         if self.free_camera:
             self._fly(keys, dt, fast)
+        else:
+            # The gimbal's tilt: I looks up, K looks down. (In free-camera
+            # mode the same keys look the free camera around instead.)
+            self.world.drone.tilt((keys[pygame.K_k] - keys[pygame.K_i]) * TILT_SPEED * fast * dt)
 
         # Altitude: 1 up, 0 down. Neither key moves the drone -- they move the
         # altitude it is flying toward, and settle() closes the gap smoothly,
@@ -825,7 +839,9 @@ class DroneApp:
             dt, settle = 1.0 / self.frame_rate, 20.0
             self._tilt_error += (-self._tilt_error * dt / settle
                                  + 0.5 * math.sqrt(2.0 * dt / settle) * self._tilt_noise.normal(0.0, 1.0, 2))
-            fields["imu_pitch"] = float(self._tilt_error[0])
+            # The IMU rides the gimbal, so it also reports the tilt the gimbal
+            # has been told to hold -- plus its own error.
+            fields["imu_pitch"] = float(self.world.drone.pitch + self._tilt_error[0])
             fields["imu_roll"] = float(self._tilt_error[1])
 
             # The cage's axle encoder: distance rolled along the heading since
@@ -996,6 +1012,7 @@ class DroneApp:
         blue = mn.Color4(0.31, 0.78, 1.0, 1.0)
 
         lines.draw_circle(drone.position, drone.radius, blue if drone.flying else green)
+        self._draw_cameras(lines)
 
         if not drone.flying:
             return
@@ -1005,6 +1022,49 @@ class DroneApp:
 
         lines.draw_circle(shadow, drone.radius, blue)
         lines.draw_transformed_line(shadow, drone.position, blue)
+
+    def _draw_cameras(self, lines):
+        """Where the cameras are and where they look, like the glasses' lens
+        marks: the stereo board on the front of the sphere with its two
+        lenses, a line along each lens's view, and a frame for the edge of
+        what they see. Drawn in the gimbal's frame, so it turns with the
+        heading and tilts with the pitch -- I and K show up here at once.
+        """
+        drone = self.world.drone
+        orange = mn.Color4(1.0, 0.6, 0.15, 1.0)
+
+        width, height = self.rig.resolution("process")
+        left = self.rig.camera(self.rig.stereo_pair[0])
+        half_width = math.tan(math.radians(left.hfov) / 2.0)
+        half_height = half_width * height / width
+
+        half_base = self.rig.baseline / 2.0
+        face = -(drone.radius + 0.006)      # just outside the shell, in front
+        reach = 0.22                        # how far out the view frame sits
+
+        lines.push_transform(mn.Matrix4.from_(drone.sensor_rotation.to_matrix(), drone.position))
+
+        # The board, and a lens at each end of it.
+        lines.draw_box(mn.Vector3(-half_base - 0.015, -0.012, face - 0.006),
+                       mn.Vector3(half_base + 0.015, 0.012, face + 0.006), orange)
+
+        for x in (-half_base, half_base):
+            lines.draw_box(mn.Vector3(x - 0.008, -0.008, face - 0.008),
+                           mn.Vector3(x + 0.008, 0.008, face), orange)
+            lines.draw_transformed_line(mn.Vector3(x, 0.0, face), mn.Vector3(x, 0.0, face - 0.35), orange)
+
+        # The view: a frame `reach` out, joined back to the board.
+        centre = mn.Vector3(0.0, 0.0, face)
+        corners = [
+            mn.Vector3(sx * half_width * reach, sy * half_height * reach, face - reach)
+            for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+        ]
+
+        for i, corner in enumerate(corners):
+            lines.draw_transformed_line(centre, corner, orange)
+            lines.draw_transformed_line(corner, corners[(i + 1) % 4], orange)
+
+        lines.pop_transform()
 
     def _draw_viewer(self):
         if not self.free_camera:
@@ -1173,7 +1233,7 @@ class DroneApp:
             self._text(label, (528, STRIP_TOP + 2), self.font, (210, 210, 210))
 
     def _draw_transcript(self):
-        x, top, bottom = 1050, STRIP_TOP + 2, STATUS_TOP - 30
+        x, top, bottom = LOG_LEFT, STRIP_TOP + 2, STATUS_TOP - 30
         width = WINDOW[0] - x - 8
 
         self._text("Log", (x, top), self.font, (210, 210, 210))
@@ -1187,7 +1247,8 @@ class DroneApp:
         y = bottom - 16
 
         for kind, line in reversed(lines):
-            if y < top + 22:
+            # Stop under the height box.
+            if y < HEIGHT_BOX_TOP + HEIGHT_BOX_HEIGHT + 6:
                 break
 
             self._text(line, (x, y), self.small, KIND_COLOURS.get(kind, (200, 200, 200)))
@@ -1196,7 +1257,7 @@ class DroneApp:
         box = pygame.Rect(x, STATUS_TOP - 26, width, 22)
         pygame.draw.rect(self.screen, (26, 28, 34), box)
         self._text(
-            "arrows drive   1/0 fly, land   click map: plan   C: clear   "
+            "arrows drive   1/0 fly, land   I/K tilt   click map: plan   C: clear   "
             "G: autopilot   R: roam   Tab: save",
             (x + 4, box.y + 4), self.small, (130, 135, 145),
         )
@@ -1284,16 +1345,21 @@ class DroneApp:
             ("what is below (0 = floor)", f"{surface:.2f} m", f"{true_surface:.2f} m"),
         ]
 
-        box = pygame.Surface((380, 92), pygame.SRCALPHA)
-        box.fill((10, 12, 16, 200))
-        self.screen.blit(box, (8, 34))
+        # At the top of the log panel, clear of the 3D view.
+        x, top = LOG_LEFT, HEIGHT_BOX_TOP
+        pygame.draw.rect(self.screen, (24, 26, 32), pygame.Rect(x, top, 380, HEIGHT_BOX_HEIGHT))
 
         for i, (name, brain, truth) in enumerate(rows):
-            y = 40 + i * 21
+            y = top + 4 + i * 21
             colour = (150, 155, 165) if i == 0 else (235, 235, 235)
-            self._text(name, (16, y), self.font, colour)
-            self._text(brain, (230, y), self.font, (120, 200, 255) if i else colour)
-            self._text(truth, (310, y), self.font, (160, 220, 160) if i else colour)
+            self._text(name, (x + 8, y), self.font, colour)
+            self._text(brain, (x + 222, y), self.font, (120, 200, 255) if i else colour)
+            self._text(truth, (x + 302, y), self.font, (160, 220, 160) if i else colour)
+
+        pitch = self.world.drone.pitch
+        tilt = "level" if abs(pitch) < 0.5 else f"{abs(pitch):.0f} deg {'down' if pitch > 0 else 'up'}"
+        self._text(f"cameras: {tilt}   (I up, K down, O level)", (x + 8, top + 4 + 4 * 21),
+                   self.small, (190, 170, 120))
 
     def _true_altitude(self):
         """How high the drone's underside truly is above the FLOOR.
@@ -1499,6 +1565,8 @@ class Script:
                                             (underside above the floor); done on
                                             arrival, or when a ceiling stops it
         {"land": true}                      come down and land
+        {"tilt": 30}                        tilt the cameras to 30 degrees down
+                                            (negative: up; 0: level)
         {"quit": true}
     """
 
@@ -1578,12 +1646,21 @@ class Script:
                 self._still_for = 0.0
         elif "land" in step:
             app.world.drone.land()
+        elif "tilt" in step:
+            self._tilt_target = float(step["tilt"])
 
     def _continue(self, dt):
         app = self.app
         step = self.steps[self._index]
 
-        if "fly" in step:
+        if "tilt" in step:
+            # At the same speed as holding I or K.
+            drone = app.world.drone
+            gap = self._tilt_target - drone.pitch
+            drone.tilt(math.copysign(min(abs(gap), TILT_SPEED * dt), gap))
+            self._done = abs(self._tilt_target - drone.pitch) < 0.5 or self._elapsed >= 10.0
+
+        elif "fly" in step:
             drone = app.world.drone
 
             # Arrived -- or stopped moving, which is what a ceiling or a beam

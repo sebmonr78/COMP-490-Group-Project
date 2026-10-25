@@ -313,14 +313,15 @@ def a_wrong_scale_is_refused():
 
 
 def a_ceiling_is_measured():
-    for height in (1.6, 2.35, 3.0):
+    # 0.7 m: flying 1.1 m up under a 2 m ceiling, which once read as outdoors.
+    for height in (0.7, 1.6, 2.35, 3.0):
         scale = depth_module.FloorScale(0.15)
         got = scale.ceiling(_room(0.15, ceiling=height), LEVEL)
 
         assert got is not None, f"no ceiling found at {height} m"
         assert abs(got - height) < 0.05, f"ceiling {height} m measured as {got:.2f}"
 
-    return "ceilings at 1.6, 2.35 and 3.0 m, all within 5 cm"
+    return "ceilings at 0.7, 1.6, 2.35 and 3.0 m, all within 5 cm"
 
 
 def open_sky_is_not_a_ceiling():
@@ -566,6 +567,37 @@ def climbing_up_stairs_is_not_taken_for_floor():
     return f"altitude within {worst * 100:.1f} cm; the top step read as {estimate.surface:.2f} m (0.90)"
 
 
+def a_surface_that_slides_out_of_the_cone_is_forgotten():
+    """Seen by hand: hovering 1 m up, something 12 cm tall came into the cone
+    in one step and slid back out a few centimetres a frame. The surface
+    stayed, and the drone landed believing it sat 14 cm up -- the floor in
+    front of it rose into the obstacle band. With the climb rate saying the
+    drone did not move, the slow change has to be the ground."""
+    from delta.brain import height as height_module
+
+    radius, below = 0.15, 0.10
+    estimate = height_module.Height(radius, below, 0.8)
+    rng = np.random.default_rng(1)
+
+    altitude, surfaces = 0.0, []
+    surfaces += [0.0] * 10                                   # on the floor
+    surfaces += [0.0] * 20                                   # take off to 1 m
+    surfaces += [0.12] * 5                                   # in, in one step
+    surfaces += [0.12 - 0.024 * i for i in range(1, 6)]      # out, slowly
+    surfaces += [0.0] * 10                                   # hover
+    surfaces += [0.0] * 20                                   # land
+
+    for i, surface in enumerate(surfaces):
+        rate = 0.5 if 10 <= i < 30 else (-0.5 if i >= 50 else 0.0)
+        altitude = max(0.0, altitude + rate * 0.1)
+        got = estimate.update(radius + altitude - below - surface, 0.1 * i, rate + 0.03 * rng.normal())
+
+    assert estimate.surface == 0.0, f"a {estimate.surface:.2f} m surface was left behind"
+    assert abs(got - altitude) < 0.02, f"landed believing it was {got - altitude:+.2f} m up"
+
+    return f"landed {abs(got - altitude) * 100:.1f} cm off, nothing left behind"
+
+
 TESTS = [
     the_brain_cannot_reach_the_simulator,
     the_truth_is_only_sent_when_asked_for,
@@ -583,6 +615,7 @@ TESTS = [
     the_height_survives_flying_over_a_table,
     something_low_at_the_edge_of_the_cone_leaves_no_trace,
     climbing_up_stairs_is_not_taken_for_floor,
+    a_surface_that_slides_out_of_the_cone_is_forgotten,
 ]
 
 

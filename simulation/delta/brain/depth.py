@@ -252,9 +252,14 @@ class FloorScale:
 
         return floor_drop(-(depth[mask] * vertical[mask]), self.lens_height)
 
-    def ceiling(self, depth_map, world_from_optical, low=0.8, high=4.0,
+    def ceiling(self, depth_map, world_from_optical, low=0.3, high=4.0,
                 support=0.04):
         """How far above the lens the ceiling is, in METRES, or None for none.
+
+        Searched from 0.3 m above the lens. The glasses searched from 0.8,
+        which suits a head 0.8 m under a 2.4 m ceiling; a drone flying 1.1 m
+        up under a 2 m ceiling has it 0.7 m overhead, found nothing, and
+        mapped the room it was flying in as outdoors.
 
         The mirror of the floor finder, and it answers the one question the
         map could not: is this spot indoors?
