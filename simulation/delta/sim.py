@@ -510,6 +510,44 @@ class Rangefinder:
         return nearest + float(self.rng.normal(0.0, self.noise))
 
 
+class ClimbRate:
+    """The flight controller's vertical speed, m/s, up positive.
+
+    A Pixhawk estimates it all the time, fusing its accelerometer with its
+    barometer, and reports it to the companion computer -- it is how the
+    drone holds an altitude at all. No new hardware.
+
+    What it is for: the rangefinder alone cannot tell the drone climbing from
+    the ground rising under it, and over stairs, climbing while crossing a
+    step, the two cancel. Knowing how fast it is climbing separates them.
+
+    Errors: a few cm/s of noise, and a bias that wanders slowly, as an
+    accelerometer-and-barometer estimate does indoors.
+    """
+
+    def __init__(self, seed=0, noise=0.03, wander=0.01, settle=10.0):
+        self.rng = np.random.default_rng(seed)
+        self.noise = noise
+        self.wander = wander
+        self.settle = settle
+        self.bias = 0.0
+        self._last = None
+
+    def read(self, height, stamp):
+        """Vertical speed reported at `stamp`, the drone's centre at `height`."""
+        if self._last is None or stamp <= self._last[1]:
+            self._last = (height, stamp)
+            return 0.0
+
+        dt = stamp - self._last[1]
+        true_rate = (height - self._last[0]) / dt
+        self._last = (height, stamp)
+
+        self.bias += -self.bias * dt / self.settle + self.wander * math.sqrt(2.0 * dt / self.settle) * self.rng.normal()
+
+        return true_rate + self.bias + self.noise * self.rng.normal()
+
+
 def first_hit(simulator, origin, direction, max_distance, ignore_object=None):
     """Distance along a ray to the first thing it hits, or None.
 
