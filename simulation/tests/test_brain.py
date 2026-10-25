@@ -31,6 +31,7 @@ survive a loop closure.
 """
 
 import ast
+import json
 import math
 import sys
 from dataclasses import dataclass
@@ -163,6 +164,72 @@ def the_brain_ignores_truth_it_was_not_given():
     assert frame.true_altitude is None, "a frame invented a true altitude"
 
     return "a plain frame carries no truth"
+
+
+def every_setting_the_code_reads_exists():
+    """Every `settings.<section>.<name>` the code reads is in brain.json.
+
+    The port from the glasses left two readers of settings DELTA does not
+    have, and neither fails until the moment it runs: a click on the map
+    read `settings.planner` and killed the brain (localization, map and
+    all); following a route read `settings.wearer` and would have killed
+    the window. Both are only caught by reading the code, so this reads it.
+    """
+    data = json.loads((PROJECT_ROOT / "config" / "brain.json").read_text())
+    files = [PROJECT_ROOT / "delta" / "brain" / "loop.py", PROJECT_ROOT / "delta" / "brain" / "__main__.py",
+             PROJECT_ROOT / "demo" / "run_drone.py", *sorted((PROJECT_ROOT / "tools").glob("*.py"))]
+
+    def chain(node):
+        """['settings', 'drone', 'radius'] for self.settings.drone.radius."""
+        names = []
+
+        while isinstance(node, ast.Attribute):
+            names.append(node.attr)
+            node = node.value
+
+        if isinstance(node, ast.Name):
+            names.append(node.id)
+
+        return names[::-1]
+
+    missing, checked = [], 0
+
+    for path in files:
+        source = path.read_text()
+        is_root = "config.load()" in source or path.name in ("loop.py", "__main__.py", "run_drone.py")
+
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Attribute):
+                continue
+
+            names = chain(node)
+
+            # self.settings.x.y, or settings.x.y where settings = config.load()
+            if names[:2] == ["self", "settings"]:
+                names = names[2:]
+            elif names[:1] == ["settings"] and is_root and path.parent.name == "tools":
+                names = names[1:]
+            else:
+                continue
+
+            value = data
+
+            for name in names:
+                if name in ("get", "items", "keys") or not isinstance(value, dict):
+                    break
+
+                checked += 1
+
+                if name not in value:
+                    missing.append(f"{path.name}:{node.lineno} settings.{'.'.join(names)}")
+                    break
+
+                value = value[name]
+
+    missing = sorted(set(missing))
+    assert not missing, "the code reads settings brain.json does not have: " + "; ".join(missing)
+
+    return f"{checked} reads of brain.json, all there"
 
 
 # What the drone's own hardware measures, and so all a frame may carry
@@ -727,6 +794,7 @@ TESTS = [
     the_truth_is_only_sent_when_asked_for,
     the_brain_ignores_truth_it_was_not_given,
     the_sim_sends_only_what_sensors_measure,
+    every_setting_the_code_reads_exists,
     the_floor_is_found_at_a_drone_height,
     the_floor_is_still_found_at_a_head_height,
     a_wrong_scale_is_refused,

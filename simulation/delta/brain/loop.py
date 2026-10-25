@@ -317,7 +317,16 @@ class Brain:
                 if message.kind == "frame":
                     self._on_frame(message)
                 elif message.kind == "command":
-                    self._command(message.fields.get("name", ""), message.fields)
+                    # A command that fails -- a route that cannot be
+                    # planned -- is reported, never allowed to end the
+                    # brain. One did: a click on the map read a settings
+                    # section that did not exist, and took localization
+                    # and the map down with it.
+                    try:
+                        self._command(message.fields.get("name", ""), message.fields)
+                    except Exception as error:
+                        traceback.print_exc()
+                        self.status(f"Could not do '{message.fields.get('name', '')}': {error!r}")
                 elif message.kind == "bye":
                     break
 
@@ -605,7 +614,7 @@ class Brain:
 
             nav = navmap.build(
                 self.grid,
-                self.settings.planner,
+                self.settings.navigation,
                 wearer_xy=here,
                 wearer_radius=float(self.settings.drone.radius),
             )
