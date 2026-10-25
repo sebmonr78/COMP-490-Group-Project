@@ -166,9 +166,10 @@ def the_brain_ignores_truth_it_was_not_given():
 
 
 # What the drone's own hardware measures, and so all a frame may carry
-# besides oracle fields: the clock, the IMU, the cage's axle encoder and the
-# down-facing rangefinder. The cameras' pictures travel as arrays.
-SENSOR_FIELDS = {"id", "stamp", "imu_yaw", "imu_pitch", "imu_roll", "odometer", "range_down"}
+# besides oracle fields: the clock, the IMU, the cage's axle encoder, the
+# down-facing rangefinder and the flight controller's vertical speed. The
+# cameras' pictures travel as arrays.
+SENSOR_FIELDS = {"id", "stamp", "imu_yaw", "imu_pitch", "imu_roll", "odometer", "range_down", "climb_rate"}
 
 
 def the_sim_sends_only_what_sensors_measure():
@@ -525,6 +526,46 @@ def something_low_at_the_edge_of_the_cone_leaves_no_trace():
     return f"ended {abs(got - 1.0) * 100:.1f} cm off, nothing left behind"
 
 
+def climbing_up_stairs_is_not_taken_for_floor():
+    """Seen by hand: flying up a staircase, the brain said it was 0.21 m
+    over the floor when it was 0.22 m over a 0.35 m step. Climbing while
+    crossing a step, the drone's rise and the step's rise cancel in the
+    reading. With the flight controller's climb rate they come apart.
+
+    Five 0.18 m steps 0.25 m deep, crossed at 0.8 m/s while climbing at
+    0.6 m/s, then the landing at the top; climb rate with 3 cm/s noise."""
+    from delta.brain import height as height_module
+
+    radius, below = 0.15, 0.10
+    estimate = height_module.Height(radius, below, 0.8)
+    rng = np.random.default_rng(0)
+
+    def step_under(x):
+        return 0.0 if x < 0.0 else 0.18 * min(5, int(x / 0.25) + 1)
+
+    worst = 0.0
+    altitude, x = 0.0, -0.5
+
+    # Take off from the floor to 0.6 m, then cross the stairs climbing to 1.6.
+    for i in range(70):
+        taking_off = i < 10
+        climbing = i >= 20 and altitude < 1.6
+        rate = 0.6 if (taking_off or climbing) else 0.0
+
+        if i >= 20:
+            x += 0.08
+
+        altitude += rate * 0.1
+        reading = radius + altitude - below - step_under(x)
+        got = estimate.update(reading, 0.1 * i, rate + 0.03 * rng.normal())
+        worst = max(worst, abs(got - altitude))
+
+    assert worst < 0.05, f"altitude off by {worst:.3f} m at worst on the stairs"
+    assert abs(estimate.surface - 0.90) < 0.05, f"the top of the stairs read as {estimate.surface:.2f} m, not 0.90"
+
+    return f"altitude within {worst * 100:.1f} cm; the top step read as {estimate.surface:.2f} m (0.90)"
+
+
 TESTS = [
     the_brain_cannot_reach_the_simulator,
     the_truth_is_only_sent_when_asked_for,
@@ -541,6 +582,7 @@ TESTS = [
     a_loop_closure_redraws_the_map,
     the_height_survives_flying_over_a_table,
     something_low_at_the_edge_of_the_cone_leaves_no_trace,
+    climbing_up_stairs_is_not_taken_for_floor,
 ]
 
 

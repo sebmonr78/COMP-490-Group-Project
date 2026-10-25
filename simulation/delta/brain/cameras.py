@@ -40,6 +40,10 @@ class StereoFrame:
     # below -- floor or furniture, it cannot tell which. None: no echo.
     range_down: Optional[float] = None
 
+    # The flight controller's vertical speed, m/s, up positive (accelerometer
+    # and barometer). None if it was not sent.
+    climb_rate: Optional[float] = None
+
     # The brain's own estimate of how high the drone's underside is above
     # the floor at this frame, filled in by the brain (height.py), so the map
     # uses the height of the moment the picture was taken.
@@ -78,6 +82,7 @@ def from_message(message):
         imu_roll=fields.get("imu_roll"),
         odometer=fields.get("odometer"),
         range_down=fields.get("range_down"),
+        climb_rate=fields.get("climb_rate"),
         true_pose=true_pose,
         true_depth=arrays.get("true_depth"),
         true_altitude=fields.get("true_altitude"),

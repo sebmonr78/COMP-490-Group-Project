@@ -66,7 +66,7 @@ from habitat.utils.visualizations import maps  # noqa: E402
 
 from delta import frames, wire  # noqa: E402
 from delta.brain import config as brain_config  # noqa: E402
-from delta.sim import Imu, Odometer, Rangefinder, World, first_hit  # noqa: E402
+from delta.sim import ClimbRate, Imu, Odometer, Rangefinder, World, first_hit  # noqa: E402
 
 WINDOW = (1600, 960)
 TOP = 560
@@ -81,10 +81,15 @@ TURN_SPEED = math.radians(50.0)     # rad/s
 FAST = 2.0                          # Shift multiplies both
 
 # The chase camera sits lower than the glasses' did, because the drone is
-# 15 cm off the floor and a camera at head height looks down at a dot.
+# 15 cm off the floor and a camera at head height looks down at a dot. It
+# rides up with the drone when it flies, by less, because ceilings here can
+# be 2 m.
 CHASE_BACK = 1.6
-CHASE_HEIGHT = 1.10
-CHASE_PITCH = -22.0
+CHASE_UP = 0.95                     # above the drone's centre, on the ground
+CHASE_UP_FLYING = 0.5               # ... and in the air
+CHASE_MARGIN = 0.2                  # stop this far short of a wall
+CHASE_NEAREST = 0.45                # never closer than this to the drone
+CHASE_PITCH = -22.0                 # the free camera's starting tilt
 
 KIND_COLOURS = {
     "reply": (110, 210, 255),
@@ -266,6 +271,7 @@ class DroneApp:
         self.odometer = Odometer(seed=9)
         self._rolled_from = None
         self.rangefinder = Rangefinder(self.rig.rangefinder or {}, self.world.simulator, seed=10)
+        self.climb_rate = ClimbRate(seed=11)
         self.frame_rate = float(self.settings.cameras.frame_rate)
 
         self.floor_height = float(self.world.drone.floor_position.y)
@@ -798,6 +804,13 @@ class DroneApp:
             if reading is not None:
                 fields["range_down"] = reading
 
+            # The flight controller's vertical speed (accelerometer and
+            # barometer): what lets the brain tell its own climbing from the
+            # ground rising under it, as on stairs.
+            fields["climb_rate"] = self.climb_rate.read(
+                float(self.world.drone.object.translation.y), self.clock
+            )
+
             if self.args.altitude == "oracle":
                 fields["true_altitude"] = self._true_altitude()
 
@@ -924,18 +937,49 @@ class DroneApp:
         pygame.display.flip()
 
     def _place_chase_camera(self):
-        feet = self.world.drone.floor_position
-        back = self.world.forward * -CHASE_BACK
+        """Behind and above the drone, looking at it -- at any height, and
+        never through a wall.
 
-        # The camera backs away from the drone the way a person would, so it
-        # stops at walls instead of passing through them.
-        spot = mn.Vector3(self.world.pathfinder.try_step(feet, feet + back))
+        The camera wants to be CHASE_BACK behind the drone and CHASE_UP above
+        it (less in the air, where ceilings are close). A ray from the drone
+        out to that spot finds the first wall, ceiling or cupboard in the
+        way, and the camera stops just short of it, so the drone stays in
+        view with a wall at its back. It then turns to look AT the drone,
+        so a climb tilts the view up instead of leaving the frame.
+
+        Pulling in is immediate -- a wall cannot be seen through for even
+        one frame -- and easing back out is gradual, so the view does not
+        jump about as the drone passes doorways.
+        """
+        drone = self.world.drone
+        target = drone.position
+        up = CHASE_UP_FLYING if drone.flying else CHASE_UP
+
+        wanted = target + self.world.forward * -CHASE_BACK + mn.Vector3(0.0, up, 0.0)
+        offset = wanted - target
+        length = offset.length()
+        direction = offset / length
+
+        hit = first_hit(self.world.simulator, target, direction, length + CHASE_MARGIN,
+                        drone.object.object_id)
+        reach = length if hit is None else max(CHASE_NEAREST, hit - CHASE_MARGIN)
+        reach = min(reach, length)
+
+        # Ease out, never in.
+        previous = getattr(self, "_chase_reach", reach)
+        reach = reach if reach < previous else previous + 0.15 * (reach - previous)
+        self._chase_reach = reach
+
+        camera = target + direction * reach
+        look = target - camera
+
         node = self.world.viewer_node
-        node.translation = mn.Vector3(spot.x, feet.y + CHASE_HEIGHT, spot.z)
-
+        node.translation = camera
         node.rotation = mn.Quaternion.rotation(
-            mn.Rad(self.world.heading), mn.Vector3.y_axis()
-        ) * mn.Quaternion.rotation(mn.Deg(CHASE_PITCH), mn.Vector3.x_axis())
+            mn.Rad(math.atan2(-look.x, -look.z)), mn.Vector3.y_axis()
+        ) * mn.Quaternion.rotation(
+            mn.Rad(math.atan2(look.y, math.hypot(look.x, look.z))), mn.Vector3.x_axis()
+        )
 
     def _outline_drone(self):
         """Ring the drone in the 3D view, and its shadow when it is flying.

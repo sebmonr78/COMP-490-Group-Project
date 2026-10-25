@@ -37,6 +37,15 @@ at a time. Taken for furniture, such a step stayed behind when the thing
 drifted back out of the cone gradually, and the brain landed believing it
 was still 9 cm up. Read as the drone rising and sinking instead, it cancels
 itself out when the thing leaves.
+
+Speed alone fails on STAIRS. Climbing at 0.8 m/s while crossing a 0.18 m
+step, the drone rises 8 cm and the step rises 18 in the same tenth of a
+second; the reading changes by only 10, slowly enough to pass for climbing,
+and the brain took the stairs for floor. So when the flight controller's
+vertical speed is known (accelerometer and barometer), it is used instead:
+the drone's own climb is subtracted from the change in the reading, and
+whatever is left over, 10 cm or more, is the ground. With no echo at all,
+the climb rate alone carries the height along until there is one.
 """
 
 
@@ -69,37 +78,63 @@ class Height:
         self.reading = None
         self.jumps = 0
 
-        self._last = None              # (stamp, lens above the surface)
+        self._stamp = None             # time of the last update
+        self._above = None             # lens above the surface, last echo
 
     @property
     def altitude(self):
         """How high the drone's underside is above the floor."""
         return max(0.0, self.lens - self.ground_lens)
 
-    def update(self, reading, stamp):
+    def update(self, reading, stamp, climb_rate=None):
         """Take one rangefinder reading (metres, or None) and return the
-        altitude it implies."""
+        altitude it implies. `climb_rate` is the flight controller's vertical
+        speed, m/s, up positive, or None if there is none."""
         self.reading = reading
 
+        stamp = float(stamp)
+        dt = 0.0 if self._stamp is None else max(0.0, stamp - self._stamp)
+        self._stamp = stamp
+
+        # How far the drone itself rose since the last update, if known.
+        rose = None if climb_rate is None else float(climb_rate) * dt
+
         # No echo -- out of range, or a soft surface that swallowed it. The
-        # last estimate stands until there is one.
+        # climb rate carries the height along; without one, it stands.
         if reading is None:
+            if rose is not None:
+                self.lens = max(self.ground_lens, self.lens + rose)
+
+            self._above = None
             return self.altitude
 
-        above_surface = float(reading) + self.below_lens
+        above = float(reading) + self.below_lens
+        lens_now = self.lens + (rose or 0.0)
+        jumped = False
 
-        if self._last is not None:
-            dt = max(float(stamp) - self._last[0], self.MIN_INTERVAL)
-            change = above_surface - self._last[1]
+        if self._above is not None:
+            change = above - self._above
 
-            if abs(change) >= max(self.MIN_JUMP, self.jump_speed * dt):
-                # The ground changed under the drone. The lens is where it
-                # was; the surface is whatever now puts it that far below.
-                surface = self.lens - above_surface
-                self.surface = 0.0 if abs(surface) < self.FLOOR_TOLERANCE else surface
-                self.jumps += 1
+            if rose is not None:
+                # Whatever the drone's own climb does not explain.
+                jumped = abs(change - rose) >= self.MIN_JUMP
+            else:
+                jumped = abs(change) >= max(
+                    self.MIN_JUMP, self.jump_speed * max(dt, self.MIN_INTERVAL)
+                )
+        elif rose is not None:
+            # The echo is back after a gap. The climb rate kept the height;
+            # whatever is under the drone now is measured against it.
+            jumped = True
 
-        self.lens = max(self.ground_lens, above_surface + self.surface)
-        self._last = (float(stamp), above_surface)
+        if jumped:
+            # The ground changed under the drone. The lens is where its own
+            # motion put it; the surface is whatever now puts it that far up.
+            surface = lens_now - above
+            self.surface = 0.0 if abs(surface) < self.FLOOR_TOLERANCE else surface
+            self.jumps += 1
+
+        self.lens = max(self.ground_lens, above + self.surface)
+        self._above = above
 
         return self.altitude

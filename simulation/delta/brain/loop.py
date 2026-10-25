@@ -348,7 +348,7 @@ class Brain:
         if self.altitude_source == "oracle" and frame.true_altitude is not None:
             self.altitude = float(frame.true_altitude)
         else:
-            self.altitude = self.height.update(frame.range_down, frame.stamp)
+            self.altitude = self.height.update(frame.range_down, frame.stamp, frame.climb_rate)
 
         frame.altitude = self.altitude
         self.altitude_frame = frame.id
