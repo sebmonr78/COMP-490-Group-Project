@@ -143,7 +143,47 @@
    ],
    "roofed_above": 0.8,
    "unroofed_below": -0.8
+  },
+  "walls": {
+   "_comment": [
+    "The floor plan, for splitting the map into rooms (rooms.py): is",
+    "there something WALL-HIGH in this cell? `band` is the heights that",
+    "count, above the floor: from just over a sofa back, a kitchen counter",
+    "or a chair (0.9 m) to just under a 2 m ceiling (1.8 m). Walls, door",
+    "frames and tall cupboards reach it; tables, sofas, beds and chairs",
+    "do not -- and those are what made room maps from a robot's-eye view",
+    "useless, splitting one living room into four around its furniture.",
+    "",
+    "Floor seen in a cell votes against a wall there (miss); weaker than",
+    "a hit, because the floor under a high shelf is seen too."
+   ],
+   "band": [0.9, 1.8],
+   "hit": 0.4,
+   "miss": -0.2,
+   "limits": [-2.0, 3.0],
+   "wall_above": 0.8
   }
+ },
+ "rooms": {
+  "_comment": [
+   "Splitting the floor plan into rooms, the way robot vacuums do: the",
+   "distance-transform method of Bormann et al., ICRA 2016 (rooms.py).",
+   "",
+   "door_width: openings narrower than this, in metres, can be doors. The",
+   "free space is shrunk until it splits at openings up to this wide; a",
+   "wider gap -- an open-plan kitchen into a living room -- joins.",
+   "min_room: pieces smaller than this, m2, are merged into a neighbour.",
+   "every_seconds: how often to re-split. The map changes slowly.",
+   "indoor: a room is indoors when this share of its floor has been seen",
+   "under a ceiling, and enclosed when this share of its edge is wall",
+   "rather than unexplored."
+  ],
+  "door_width": 1.2,
+  "max_room_width": 4.0,
+  "min_room": 2.0,
+  "every_seconds": 2.0,
+  "indoor": 0.6,
+  "enclosed": 0.6
  },
  "navigation": {
   "clearance": 0.25,

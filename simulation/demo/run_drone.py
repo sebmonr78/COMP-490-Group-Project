@@ -122,6 +122,13 @@ TARGET_COLOUR = (255, 220, 80)
 THING_COLOUR = (215, 120, 255)
 PLACE_COLOUR = (255, 220, 80)
 
+# The brain's rooms: one tint each, cycled, and the doors between them.
+ROOM_COLOURS = [
+    (230, 120, 110), (110, 190, 120), (110, 150, 235), (230, 190, 90), (190, 120, 220),
+    (90, 200, 200), (235, 150, 60), (160, 200, 90), (220, 110, 170), (140, 140, 240),
+]
+DOOR_COLOUR = (255, 235, 120)
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Drive the drone and watch it map.")
@@ -164,6 +171,7 @@ class BrainLink:
         self.ready = False
         self.state = None
         self.state_arrays = {}
+        self.state_at = None           # when the last state arrived
         self.said = queue.Queue()
         self.error = None
         self.closed = False
@@ -186,6 +194,7 @@ class BrainLink:
                     self.said.put(("system", message.fields["text"]))
                 elif message.kind == "state":
                     self.state, self.state_arrays = message.fields, message.arrays
+                    self.state_at = time.monotonic()
                 elif message.kind == "ready":
                     self.ready = True
 
@@ -195,13 +204,13 @@ class BrainLink:
 
     @property
     def connected(self):
-        return self.link is not None and self.link.open
+        return self.link is not None and self.link.open and self.error is None
 
     def send(self, kind, fields=None, arrays=None):
         if self.connected:
             try:
                 self.link.send(kind, fields, arrays)
-            except wire.Closed as error:
+            except (wire.Closed, OSError) as error:
                 self.error = str(error)
 
     def close(self):
@@ -329,6 +338,7 @@ class DroneApp:
 
         self.transcript = []
         self.show_truth = True
+        self.show_rooms = True
         self.free_camera = False
         self.autopilot = False
         self.roam = None
@@ -533,6 +543,8 @@ class DroneApp:
             self.show_truth = not self.show_truth
         elif key == pygame.K_F12:
             self.screenshot()
+        elif key == pygame.K_n:
+            self.show_rooms = not self.show_rooms
         elif key == pygame.K_o and not self.free_camera:
             self.world.drone.pitch = 0.0
             self.note("Cameras level.")
@@ -928,6 +940,9 @@ class DroneApp:
             "flying": bool(self.world.flying),
             # The script's current {"label": ...}: which motion this is.
             "label": self.script.label if self.script is not None else None,
+            # How many frames a second the brain is turning into map.
+            "perception_hz": stats.get("rates", {}).get("perception"),
+            "rtabmap_ms": loc.get("ms"),
         }
 
         with open(self.args.trace, "a") as out:
@@ -1082,6 +1097,22 @@ class DroneApp:
         label = "Free camera (WASD, IJKL, Z/X) - V to follow" if self.free_camera else "Behind you - V for free camera"
         self._text(label, (12, 10), self.big, (240, 240, 240))
 
+    def _panel_affine(self, layer):
+        """Cell (col, row) of a brain layer -> brain world -> true world ->
+        map-panel pixel. `layer` carries its own origin and resolution."""
+        origin, resolution = layer["origin"], layer["resolution"]
+
+        a = self.alignment.matrix()
+        cell = np.array([[resolution, 0.0, origin[0]], [0.0, resolution, origin[1]]])
+        world = a[:, :2] @ cell
+        world[:, 2] += a[:, 2]
+        panel = np.array([[self.scale, 0.0, -self.view_min[0] * self.scale + self.panel_offset[0]],
+                          [0.0, -self.scale, self.view_max[1] * self.scale + self.panel_offset[1]]])
+        affine = panel[:, :2] @ world
+        affine[:, 2] += panel[:, 2]
+
+        return affine
+
     def _draw_map(self):
         canvas = np.zeros((TOP, 800, 3), np.uint8)
         canvas[:] = (20, 23, 28)
@@ -1106,18 +1137,7 @@ class DroneApp:
 
         if state and "grid" in state and "grid" in arrays and self.alignment.ready:
             grid = arrays["grid"]
-            origin = state["grid"]["origin"]
-            resolution = state["grid"]["resolution"]
-
-            # Grid cell (col, row) -> brain world -> true world -> panel.
-            a = self.alignment.matrix()
-            cell = np.array([[resolution, 0.0, origin[0]], [0.0, resolution, origin[1]]])
-            world = a[:, :2] @ cell
-            world[:, 2] += a[:, 2]
-            panel = np.array([[self.scale, 0.0, -self.view_min[0] * self.scale + self.panel_offset[0]],
-                              [0.0, -self.scale, self.view_max[1] * self.scale + self.panel_offset[1]]])
-            affine = panel[:, :2] @ world
-            affine[:, 2] += panel[:, 2]
+            affine = self._panel_affine(state["grid"])
 
             colours = np.zeros(grid.shape + (3,), np.uint8)
             colours[grid == 1] = FREE_COLOUR
@@ -1135,6 +1155,15 @@ class DroneApp:
             mask = cv2.warpAffine((grid > 0).astype(np.uint8), affine, (800, TOP), flags=cv2.INTER_NEAREST)
             warped = cv2.warpAffine(colours, affine, (800, TOP), flags=cv2.INTER_NEAREST)
             canvas[mask > 0] = warped[mask > 0]
+
+        # The brain's rooms, each its own tint over the map (N to hide).
+        if self.show_rooms and state and "rooms" in state and "rooms" in arrays and self.alignment.ready:
+            labels = arrays["rooms"]
+            warped = cv2.warpAffine(labels.astype(np.uint8), self._panel_affine(state["rooms"]),
+                                    (800, TOP), flags=cv2.INTER_NEAREST)
+            tinted = warped > 0
+            palette = np.array([(0, 0, 0)] + ROOM_COLOURS * 26, np.float32)[:256]
+            canvas[tinted] = (0.45 * canvas[tinted] + 0.55 * palette[warped[tinted]]).astype(np.uint8)
 
         surface = pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2)))
         self.screen.blit(surface, (800, 0))
@@ -1169,6 +1198,16 @@ class DroneApp:
                 target = np.array(self.to_panel(self.alignment.point(state["route"]["target"]))) + offset
                 pygame.draw.circle(self.screen, TARGET_COLOUR, target, 8, 2)
 
+            if self.show_rooms and "rooms" in state:
+                for door in state["rooms"]["doors"]:
+                    p = np.array(self.to_panel(self.alignment.point(door["xy"]))) + offset
+                    pygame.draw.circle(self.screen, DOOR_COLOUR, p, 4)
+
+                for room in state["rooms"]["list"]:
+                    p = np.array(self.to_panel(self.alignment.point(room["xy"]))) + offset
+                    self._text(f"{room['id']}  {room['kind']}  {room['area']:.0f} m2",
+                               p - (30, 7), self.small, (250, 250, 250))
+
             if "pose" in state:
                 pose = state["pose"]
                 p = np.array(self.to_panel(self.alignment.point((pose["x"], pose["y"])))) + offset
@@ -1190,16 +1229,25 @@ class DroneApp:
         self._text("green: really here   orange: believed here   "
                    "olive: the drone worked out this is outdoors   "
                    "M: true layout "
-                   + ("on" if self.show_truth else "off"),
+                   + ("on" if self.show_truth else "off")
+                   + "   N: rooms " + ("on" if self.show_rooms else "off"),
                    (812, 34), self.small, (170, 175, 185))
+
+        silent = time.monotonic() - self.brain.state_at if self.brain is not None and self.brain.state_at else 0.0
 
         if self.brain is None:
             self._text("Running without a brain (--no-brain)", (812, 56), self.font, (200, 120, 120))
         elif not self.brain.connected:
-            message = self.brain.error or "Waiting for the brain to start..."
-            self._text(message, (812, 56), self.font, (220, 180, 90))
+            message = (f"The brain stopped ({self.brain.error}). Close this window and see outputs/logs/brain.log."
+                       if self.brain.error else "Waiting for the brain to start...")
+            self._text(message, (812, 56), self.font, (240, 120, 90))
         elif not self.brain.ready:
             self._text("Brain loading models...", (812, 56), self.font, (220, 180, 90))
+        elif silent > 3.0:
+            # Connected but quiet: the brain is stuck or one of its threads
+            # died. Its position and map on screen are frozen, not live.
+            self._text(f"The brain has not answered for {silent:.0f} s -- what you see is frozen. "
+                       "See outputs/logs/brain.log.", (812, 56), self.font, (240, 120, 90))
 
     def _draw_feeds(self):
         """The left lens, and the depth the brain made of it.
@@ -1360,6 +1408,184 @@ class DroneApp:
         tilt = "level" if abs(pitch) < 0.5 else f"{abs(pitch):.0f} deg {'down' if pitch > 0 else 'up'}"
         self._text(f"cameras: {tilt}   (I up, K down, O level)", (x + 8, top + 4 + 4 * 21),
                    self.small, (190, 170, 120))
+
+    def _true_rooms(self):
+        """HSSD's own room outlines for this house, as a picture on the
+        navmesh grid: (labels, names), 0 where no room is. The answer key --
+        for scoring the brain's rooms, never sent to it."""
+        if getattr(self, "_rooms_truth", None) is not None:
+            return self._rooms_truth
+
+        dataset = self.world.config["dataset"]
+        root = Path(os.environ.get(dataset["environment_variable"], dataset["default_root"])).expanduser()
+        regions = json.loads((root / dataset["semantic_file"]).read_text()).get("region_annotations", [])
+
+        navigable, lower = self._truth_grid()
+        labels = np.zeros(navigable.shape, np.uint8)
+        names = [None]
+
+        # Outdoor areas first, so a room drawn over one wins.
+        for region in sorted(regions, key=lambda r: r["label"] != "outdoor"):
+            points = np.array([[(p[0] - lower[0]) / 0.05, (p[2] - lower[1]) / 0.05] for p in region["poly_loop"]])
+            names.append(region["label"])
+            cv2.fillPoly(labels, [np.round(points).astype(np.int32)], len(names) - 1)
+
+        self._rooms_truth = (labels, names, self._join_open_rooms(labels, names, lower))
+        return self._rooms_truth
+
+    def _join_open_rooms(self, labels, names, lower):
+        """HSSD's rooms as WALLS make them: neighbours with no wall between.
+
+        HSSD names rooms by use. An open-plan living room, dining room and
+        kitchen are three rooms to it and one space to anything that only
+        sees walls -- a robot vacuum too, which shows them as one room until
+        someone splits it. So: along every boundary two outlines share, look
+        across it with a ray at 1.2 and 1.6 m. If most of it is open, the two
+        are one room here. The by-use split needs to know what is IN a room
+        (a stove, a sofa), which is a later feature; both scores are kept.
+        """
+        simulator = self.world.simulator
+        me = self.world.drone.object.object_id
+        joined = list(range(len(names)))
+
+        def root(i):
+            while joined[i] != i:
+                i = joined[i]
+            return i
+
+        pairs = {}
+
+        for (sa, sb), (da, db) in (
+            ((slice(1, None), slice(None)), (1, 0)),
+            ((slice(None), slice(1, None)), (0, 1)),
+        ):
+            here = labels[:labels.shape[0] - da, :labels.shape[1] - db]
+            there = labels[sa, sb]
+            touching = (here != there) & (here > 0) & (there > 0)
+
+            for row, col in zip(*np.nonzero(touching)):
+                a, b = int(here[row, col]), int(there[row, col])
+
+                if "outdoor" in (names[a], names[b]):
+                    continue
+
+                pairs.setdefault((min(a, b), max(a, b)), []).append((row, col, da, db))
+
+        for (a, b), cells in pairs.items():
+            sample = cells[:: max(1, len(cells) // 40)]
+            walls = 0
+
+            for row, col, da, db in sample:
+                x = lower[0] + (col + 0.5) * 0.05
+                z = lower[1] + (row + 0.5) * 0.05
+                across = mn.Vector3(float(db), 0.0, float(da))
+
+                for height in (1.2, 1.6):
+                    start = mn.Vector3(x, self.floor_height + height, z) - across * 0.3
+                    if first_hit(simulator, start, across, 0.65, me) is not None:
+                        walls += 1
+                        break
+
+            if walls < 0.5 * len(sample):
+                joined[root(b)] = root(a)
+
+        return [root(i) for i in range(len(names))]
+
+    def _truth_grid(self):
+        """The navmesh as a 5 cm picture, and its corner (x, z)."""
+        if self._navigable is None:
+            self._navigable = maps.get_topdown_map(
+                self.world.pathfinder, self.floor_height, meters_per_pixel=0.05, draw_border=False
+            ) == 1
+            lower, _ = self.world.pathfinder.get_bounds()
+            self._nav_lower = np.array([lower.x, lower.z])
+
+        return self._navigable, self._nav_lower
+
+    def score_rooms(self, name):
+        """Score the brain's rooms against HSSD's room outlines.
+
+            recall      per true room the brain has mapped (30% or more of
+                        it), the share of its mapped floor that lies in ONE
+                        brain room -- 1.0 if no room was cut in pieces
+            precision   per brain room, the share of it in ONE true room --
+                        1.0 if no two rooms were run together
+            indoor      per brain room that said indoor or outdoor, right
+                        or wrong against the true room it mostly lies in
+
+        The measures of Bormann et al.'s survey, on the part of the house
+        that was explored. Appends to outputs/eval/rooms.jsonl and saves a
+        picture: true outlines over the brain's rooms.
+        """
+        state = self.brain.state if self.brain else None
+        arrays = self.brain.state_arrays if self.brain else {}
+
+        if not (state and "rooms" in state and "rooms" in arrays and self.alignment.ready):
+            print(f"[rooms] {name}: no rooms from the brain yet", flush=True)
+            return
+
+        truth, names, joined = self._true_rooms()
+        _, lower = self._truth_grid()
+        height, width = truth.shape
+
+        meta = state["rooms"]
+        r = 0.05
+        cell = np.array([[meta["resolution"], 0.0, meta["origin"][0]], [0.0, meta["resolution"], meta["origin"][1]]])
+        a = self.alignment.matrix()
+        world = a[:, :2] @ cell
+        world[:, 2] += a[:, 2]
+        to_pixel = np.array([[1 / r, 0.0, -lower[0] / r], [0.0, -1 / r, -lower[1] / r]])
+        affine = to_pixel[:, :2] @ world
+        affine[:, 2] += to_pixel[:, 2]
+
+        brain = cv2.warpAffine(arrays["rooms"].astype(np.uint8), affine, (width, height), flags=cv2.INTER_NEAREST)
+        kinds = {room["id"]: room for room in meta["list"]}
+
+        # By walls: HSSD's rooms with the open-plan ones joined.
+        group_names = {}
+
+        for g in range(1, len(names)):
+            group_names.setdefault(joined[g], set()).add(names[g])
+
+        by_walls = np.array(joined, np.int32)[truth]
+        walls_names = {g: "+".join(sorted(n)) for g, n in group_names.items()}
+        walls_names[0] = None
+
+        walls_score = _room_scores(brain, by_walls, walls_names, kinds)
+        use_score = _room_scores(brain, truth.astype(np.int32), dict(enumerate(names)), kinds)
+
+        result = {
+            "name": name,
+            "time_s": round(self.clock, 1),
+            "rooms_brain": len(kinds),
+            "doors": len(meta["doors"]),
+            "by_walls": walls_score,
+            "by_use": {k: use_score[k] for k in ("rooms_true_explored", "recall", "precision")},
+        }
+        print(f"[rooms] {json.dumps(result)}", flush=True)
+
+        folder = PROJECT_ROOT / "outputs" / "eval"
+        (folder / "rooms").mkdir(parents=True, exist_ok=True)
+
+        with open(folder / "rooms.jsonl", "a") as log:
+            log.write(json.dumps(result) + "\n")
+
+        # The brain's rooms in colour; HSSD's outlines by use in grey, and the
+        # rooms the walls make -- what the brain is scored against -- in white.
+        palette = np.array([(15, 15, 15)] + [c[::-1] for c in ROOM_COLOURS] * 26, np.uint8)[:256]
+        picture = palette[brain]
+        square = np.ones((3, 3), np.uint8)
+        picture[cv2.morphologyEx(truth.astype(np.uint8), cv2.MORPH_GRADIENT, square) > 0] = (110, 110, 110)
+        picture[cv2.morphologyEx(by_walls.astype(np.uint8), cv2.MORPH_GRADIENT, square) > 0] = (255, 255, 255)
+
+        for g in range(1, len(names)):
+            ys, xs = np.nonzero(truth == g)
+
+            if len(xs):
+                cv2.putText(picture, names[g], (int(xs.mean()) - 20, int(ys.mean())),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
+        cv2.imwrite(str(folder / "rooms" / f"{name}.png"), picture)
 
     def _true_altitude(self):
         """How high the drone's underside truly is above the FLOOR.
@@ -1539,6 +1765,51 @@ class DroneApp:
         cv2.imwrite(str(folder / "live_map" / f"{name}.png"), picture)
 
 
+def _room_scores(brain, truth, names, kinds):
+    """Recall, precision and indoor-or-out of the brain's rooms against one
+    truth picture (see DroneApp.score_rooms). `names` maps a truth id to its
+    name; `kinds` the brain's room id to its published description."""
+    mapped = brain > 0
+    recalls, precisions, judged, right, rows = [], [], 0, 0, []
+
+    for g in np.unique(truth[truth > 0]):
+        inside = truth == g
+        seen = inside & mapped
+
+        if seen.sum() < 0.3 * inside.sum() or "outdoor" in (names.get(int(g)) or ""):
+            continue
+
+        recalls.append(np.bincount(brain[seen], minlength=256).max() / seen.sum())
+
+    for b, room in kinds.items():
+        labelled = (brain == b) & (truth > 0)
+
+        if labelled.sum() == 0:
+            continue
+
+        values, counts = np.unique(truth[labelled], return_counts=True)
+        best = int(values[counts.argmax()])
+        share = counts.max() / labelled.sum()
+        precisions.append(share)
+
+        really = "outdoor" if "outdoor" in (names.get(best) or "") else "indoor"
+        said = {"indoor": "indoor", "outdoor": "outdoor", "covered": "outdoor"}.get(room["kind"])
+
+        if said is not None:
+            judged += 1
+            right += said == really
+
+        rows.append(f"{b}: {room['kind']} {room['area']} m2 -> {names.get(best)} ({share:.0%})")
+
+    return {
+        "rooms_true_explored": len(recalls),
+        "recall": round(float(np.mean(recalls)), 3) if recalls else None,
+        "precision": round(float(np.mean(precisions)), 3) if precisions else None,
+        "indoor_right": f"{right}/{judged}",
+        "rooms": rows,
+    }
+
+
 # ---------------------------------------------------------------------
 # Scripts: the same app, driven from a file
 # ---------------------------------------------------------------------
@@ -1561,6 +1832,8 @@ class Script:
         {"wait_for": "ready", "timeout": 300}   until the brain is ready
         {"screenshot": "name"}
         {"score": "name"}                   score the live map (outputs/eval/)
+        {"score_rooms": "name"}             score the brain's rooms against
+                                            HSSD's room outlines
         {"fly": 1.2}                        take off if needed and fly to 1.2 m
                                             (underside above the floor); done on
                                             arrival, or when a ceiling stops it
@@ -1619,6 +1892,9 @@ class Script:
             self._done = True
         elif "score" in step:
             app.score_map(step["score"])
+            self._done = True
+        elif "score_rooms" in step:
+            app.score_rooms(step["score_rooms"])
             self._done = True
         elif "label" in step:
             self.label = str(step["label"])
