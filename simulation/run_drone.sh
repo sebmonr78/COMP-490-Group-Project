@@ -51,11 +51,18 @@ if [[ " $* " != *" --no-brain "* ]]; then
         exit 1
     fi
 
+    # Each run its own log, so a second run cannot overwrite the first's --
+    # a brain that died in one run was once unexplainable because a test run
+    # straight after had written over its log. brain.log always points at the
+    # newest.
+    LOG="outputs/logs/brain-$(date +%Y%m%d-%H%M%S).log"
+    ln -sf "$(basename "${LOG}")" outputs/logs/brain.log
+
     # In its own process group, so that the cleanup below can stop exactly
     # this brain and everything it started -- the RTAB-Map bridge included --
     # without touching anyone else's.
     setsid conda run -n brain --no-capture-output \
-        python -u -m delta.brain > outputs/logs/brain.log 2>&1 &
+        python -u -m delta.brain > "${LOG}" 2>&1 &
     BRAIN_PID=$!
 fi
 

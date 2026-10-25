@@ -49,6 +49,7 @@ from delta.brain import (
     occupancy,
     planner,
     rectify,
+    rooms as rooms_module,
 )
 from delta.wire import Closed
 
@@ -159,6 +160,11 @@ class Brain:
         self.view = View()
         self.grid = None
         self.route = None
+
+        # The map cut into rooms (rooms.py): (fields, labels), redone every
+        # rooms.every_seconds.
+        self._rooms = None
+        self._rooms_at = 0.0
 
         self.rates = {name: Rate() for name in ("frames", "perception")}
         self.timing = {}
@@ -659,6 +665,43 @@ class Brain:
             except Closed:
                 return
 
+    def _split_rooms(self, classes, walls, roof, corner, resolution):
+        """Cut the map into rooms (rooms.py) and keep the answer to publish.
+
+        The rooms carry their own origin: the grid's window grows between
+        splits, and the room labels must land where they were computed.
+        """
+        self._rooms_at = time.monotonic()
+        started = time.monotonic()
+
+        found = rooms_module.segment(classes, walls, roof, resolution, self.settings.rooms)
+
+        def world(col, row):
+            return [float(corner[0] + col * resolution), float(corner[1] + row * resolution)]
+
+        fields = {
+            "origin": [float(corner[0]), float(corner[1])],
+            "resolution": resolution,
+            "shrink": round(found.shrink, 2),
+            "list": [
+                {
+                    "id": room.id, "area": round(room.area, 1), "xy": world(*room.point),
+                    "kind": room.kind,
+                    "roofed": None if room.roofed is None else round(room.roofed, 2),
+                    "enclosed": round(room.enclosed, 2),
+                }
+                for room in found.rooms
+            ],
+            "doors": [
+                {"rooms": list(door.rooms), "xy": world(*door.point), "width": round(door.width, 2)}
+                for door in found.doors
+            ],
+        }
+
+        labels = found.labels.astype(np.uint8 if found.labels.max() < 256 else np.uint16)
+        self._rooms = (fields, labels)
+        self.timing.update(rooms=(time.monotonic() - started) * 1000.0)
+
     def _roof_counts(self):
         """How many mapped cells are indoors and outdoors, for the status bar."""
         if self.grid is None:
@@ -695,6 +738,8 @@ class Brain:
                 rx, ry, ryaw = frames.planar(fix.raw_pose)
                 fields["pose"]["raw"] = [rx, ry, ryaw]
 
+        plan = None
+
         with self.lock:
             if self.grid is not None:
                 bounds = self.grid.known_bounds(margin=0.5)
@@ -704,6 +749,13 @@ class Brain:
 
                     arrays["grid"] = self.grid.classes()[r0:r1, c0:c1]
                     arrays["roof"] = self.grid.roof_classes()[r0:r1, c0:c1]
+
+                    # A copy for splitting into rooms, outside the lock.
+                    if time.monotonic() - self._rooms_at >= float(self.settings.rooms.every_seconds):
+                        plan = (
+                            arrays["grid"], self.grid.wall_cells()[r0:r1, c0:c1].copy(),
+                            arrays["roof"], self.grid.to_world([c0, r0]), self.grid.resolution,
+                        )
 
                     # What the drone could DO in each cell -- roll across,
                     # roll under, fly over -- once the grid keeps height
@@ -733,6 +785,19 @@ class Brain:
                 arrays["depth"] = np.clip(
                     view.depth.depth / 6.0 * 255.0, 0, 255
                 ).astype(np.uint8)
+
+        if plan is not None:
+            # Rooms are a view of the map, not something the drone needs to
+            # keep flying: a failure here is logged and skipped, never allowed
+            # to stop the state the window lives on.
+            try:
+                self._split_rooms(*plan)
+            except Exception as error:
+                traceback.print_exc()
+                self.status(f"Splitting rooms failed: {error!r}")
+
+        if self._rooms is not None:
+            fields["rooms"], arrays["rooms"] = self._rooms
 
         fields["stats"] = {
             "rates": {name: round(rate.value, 1) for name, rate in self.rates.items()},
