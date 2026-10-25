@@ -13,11 +13,19 @@
     "environment_variable": "HABITAT_DATA_PATH",
     "default_root": "~/habitat-data/versioned_data/hssd-hab",
     "configuration_file": "hssd-hab-uncluttered.scene_dataset_config.json",
-    "scene_id": "103997586_171030666",
-    "scene_file": "scenes-uncluttered/103997586_171030666.scene_instance.json",
-    "semantic_file": "semantics/scenes/103997586_171030666.semantic_config.json",
-    "stage_file": "stages/103997586_171030666.glb",
-    "drone_navmesh_file": "generated_navmeshes/103997586_171030666_drone.navmesh"
+    "scene_id": "102816036",
+    "scene_file": "scenes-uncluttered/102816036.scene_instance.json",
+    "semantic_file": "semantics/scenes/102816036.semantic_config.json",
+    "stage_file": "stages/102816036.glb",
+    "drone_navmesh_file": "generated_navmeshes/102816036_drone.navmesh",
+    "_scene": [
+      "A family home on one floor, 29 x 21 m: 536 m2 indoors by HSSD's room",
+      "outlines, 36 rooms (5 bedrooms, 6 bathrooms, 3 toilets, kitchen,",
+      "dining room, 2 family rooms, 2 offices, hallway, garage), 290 m2 the",
+      "drone can roll on in one connected piece. Chosen over the first",
+      "house (103997586_171030666: 157 m2, 6 rooms, no bedrooms) for room",
+      "work; HSSD_SCENE=<id> runs any other."
+    ]
   },
   "drone": {
     "diameter": 0.3,
