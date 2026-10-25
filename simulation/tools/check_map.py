@@ -94,7 +94,7 @@ def main():
 
     settings = config.load()
     rig = rig_module.load()
-    lens = float(settings.wearer.lens_height)
+    lens = float(settings.drone.lens_height)
 
     walk = PROJECT_ROOT / "outputs" / "walks" / args.walk
 

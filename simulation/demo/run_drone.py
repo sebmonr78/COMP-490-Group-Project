@@ -573,11 +573,14 @@ class DroneApp:
         if not (800 <= x < WINDOW[0] and y < TOP):
             return
 
-        world_xy = (
+        self.plan_to((
             (x - self.panel_offset[0]) / self.scale + self.view_min[0],
             self.view_max[1] - (y - self.panel_offset[1]) / self.scale,
-        )
+        ))
 
+    def plan_to(self, world_xy):
+        """Ask the brain for a route to a spot in true-world metres (x east,
+        y north) -- what a click on the map does, and what a script does."""
         # World -> the brain's frame: the inverse of Alignment.point.
         c, s_ = math.cos(-self.alignment.yaw), math.sin(-self.alignment.yaw)
         dx, dy = np.array(world_xy) - self.alignment.offset
@@ -720,11 +723,13 @@ class DroneApp:
         y = pose["y"] + s * forward + c * left
         yaw = pose["yaw"] + turned
 
-        # From the left lens to the middle of the body, as the brain does it.
-        back = float(self.settings.wearer.lens_forward)
+        # From the left lens to the middle of the body, as the brain does it
+        # (loop._body): half a baseline to the right. The glasses also stepped
+        # back from the lens to the middle of a head; a sphere's lenses ARE at
+        # its middle, so there is no such step -- and the glasses' setting for
+        # it, read here after the port, crashed the autopilot.
         right = self.rig.baseline / 2.0
-        body = (x - back * math.cos(yaw) + right * math.sin(yaw),
-                y - back * math.sin(yaw) - right * math.cos(yaw))
+        body = (x + right * math.sin(yaw), y - right * math.cos(yaw))
 
         return body, yaw
 
@@ -1834,6 +1839,8 @@ class Script:
         {"score": "name"}                   score the live map (outputs/eval/)
         {"score_rooms": "name"}             score the brain's rooms against
                                             HSSD's room outlines
+        {"plan_ahead": 3}                   plan a route to the spot 3 m ahead,
+                                            as a click on the map would
         {"fly": 1.2}                        take off if needed and fly to 1.2 m
                                             (underside above the floor); done on
                                             arrival, or when a ceiling stops it
@@ -1895,6 +1902,12 @@ class Script:
             self._done = True
         elif "score_rooms" in step:
             app.score_rooms(step["score_rooms"])
+            self._done = True
+        elif "plan_ahead" in step:
+            # A spot this far straight ahead, planned to as a click would.
+            here, ahead = app.world.drone.floor_position, app.world.forward * float(step["plan_ahead"])
+            self.route_target = (float(here.x + ahead.x), -float(here.z + ahead.z))
+            app.plan_to(self.route_target)
             self._done = True
         elif "label" in step:
             self.label = str(step["label"])
@@ -2002,6 +2015,16 @@ class Script:
             if self._arrived or self._elapsed >= float(step["autopilot"]):
                 app.autopilot = False
                 self._done = True
+
+                # How close it got to a spot planned with plan_ahead.
+                if getattr(self, "route_target", None) is not None:
+                    here = app.world.drone.floor_position
+                    off = math.dist((here.x, -here.z), self.route_target)
+                    # Routes stop short of the spot on purpose: by
+                    # navigation.approach in brain.json, 0.5 m at the least.
+                    print(f"[route] ended {off:.2f} m from the spot it was sent to "
+                          f"({'reached' if off < 0.8 else 'NOT reached'}; routes stop ~0.5 m short)",
+                          flush=True)
 
         elif "wait_for" in step:
             if app.brain is not None and app.brain.error:
