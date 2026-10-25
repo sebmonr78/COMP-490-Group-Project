@@ -1188,16 +1188,7 @@ class DroneApp:
             f"(DA3 {ms.get('depth', 0)} ms, map {ms.get('map', 0)} ms)",
         ]
 
-        altitude = stats.get("altitude")
-
-        if altitude is not None and (altitude > 0.02 or self.world.flying):
-            # The brain's height next to the truth, and what it thinks is
-            # under it -- the rangefinder test, readable while flying by hand.
-            under = stats.get("surface_below") or 0.0
-            parts.append(
-                f"height {altitude:.2f} m (true {self._true_altitude():.2f})"
-                + (f", over something {under:.2f} m tall" if under else ", over the floor")
-            )
+        self._draw_height(stats)
 
         roofed = stats.get("roofed")
 
@@ -1219,6 +1210,46 @@ class DroneApp:
             parts.append("RECOGNISING LAST SESSION'S MAP...")
 
         self._text("   |   ".join(parts), (8, STATUS_TOP + 5), self.small, (175, 180, 190))
+
+    def _draw_height(self, stats):
+        """Two heights, the brain's next to the truth, on the 3D view:
+
+            above the floor        how high the drone is in the room
+            above what is below    how far it would drop to land -- the
+                                   same number over the floor, less over
+                                   a table
+
+        The truth is the moment the brain's estimate is from, so a climb
+        does not show as an error just because the picture is a frame old.
+        """
+        altitude = stats.get("altitude")
+
+        if altitude is None:
+            return
+
+        surface = stats.get("surface_below") or 0.0
+        true_altitude, true_surface = self.height_by_frame.get(
+            stats.get("altitude_frame"), (self._true_altitude(), self._surface_below())
+        )
+        true_surface = max(0.0, true_surface or 0.0)
+
+        rows = [
+            ("HEIGHT", "brain", "truth"),
+            ("above the floor", f"{altitude:.2f} m", f"{true_altitude:.2f} m"),
+            ("above what is below", f"{altitude - surface:.2f} m", f"{true_altitude - true_surface:.2f} m"),
+            ("what is below (0 = floor)", f"{surface:.2f} m", f"{true_surface:.2f} m"),
+        ]
+
+        box = pygame.Surface((380, 92), pygame.SRCALPHA)
+        box.fill((10, 12, 16, 200))
+        self.screen.blit(box, (8, 34))
+
+        for i, (name, brain, truth) in enumerate(rows):
+            y = 40 + i * 21
+            colour = (150, 155, 165) if i == 0 else (235, 235, 235)
+            self._text(name, (16, y), self.font, colour)
+            self._text(brain, (230, y), self.font, (120, 200, 255) if i else colour)
+            self._text(truth, (310, y), self.font, (160, 220, 160) if i else colour)
 
     def _true_altitude(self):
         """How high the drone's underside truly is above the FLOOR.
