@@ -12,7 +12,7 @@ One at a time: finish it, measure it, try it by hand, then the next.
 | Localization: RTAB-Map + IMU heading + cage axle encoder | turns, climbs, flying: a few cm per motion; blind against a wall: 0.76 m → stays put |
 | Height: down-facing rangefinder + flight controller's climb rate | 1–2 cm; table and stairs recognised as "something under me" |
 | Camera tilt (I/K/O), camera marker, height box | |
-| Rooms v1: the 2D map split at doors, indoor/outdoor per room | by walls: 0.98 / 0.98 (true pose), 0.88 / 0.85 (RTAB-Map) |
+| Rooms v1: the 2D map split at doors (indoor/outdoor taken out again: not needed) | by walls: 0.98 / 0.98 (true pose), 0.88 / 0.85 (RTAB-Map) |
 
 ## Next
 
