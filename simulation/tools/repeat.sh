@@ -19,6 +19,16 @@ cd "$(dirname "$0")/.."
 name="${1:?name}"; count="${2:?count}"; script="${3:-tests/scripts/diagnose.json}"
 shift 3 2>/dev/null || shift $#
 
+# Not while someone else is driving. Each run below deletes outputs/memory
+# first, which is the map database of a run already in progress -- and that
+# run's brain owns the port anyway, so these would all be refused after the
+# damage was done. Checked once, up front, before anything is touched.
+if pgrep -f "python -u -m delta.brain" > /dev/null; then
+    echo "A DELTA brain is already running -- close it first. Nothing was changed:" >&2
+    pgrep -af "python -u -m delta.brain" >&2
+    exit 1
+fi
+
 out="outputs/repeat/${name}"
 rm -rf "${out}"
 mkdir -p "${out}"

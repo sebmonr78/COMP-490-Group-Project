@@ -33,5 +33,6 @@
 
   {"label": "on the ground again"},
   {"wait": 3},
+  {"score": "after_landing"},
   {"quit": true}
 ]

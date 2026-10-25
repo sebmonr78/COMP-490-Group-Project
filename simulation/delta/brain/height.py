@@ -46,6 +46,16 @@ vertical speed is known (accelerometer and barometer), it is used instead:
 the drone's own climb is subtracted from the change in the reading, and
 whatever is left over, 10 cm or more, is the ground. With no echo at all,
 the climb rate alone carries the height along until there is one.
+
+Smaller leftovers, with the climb rate, are not thrown away either. Seen by
+hand: something 12 cm tall came into the cone in one step -- a surface --
+and slid back out of it a few centimetres a frame, which passed for the
+drone sinking. The surface stayed, the drone landed believing it sat 14 cm
+up, and the floor in front of it rose into the obstacle band of the map.
+So with a climb rate, the height follows the drone's own climb, pulled
+toward the reading only gently (CORRECTION, enough to cancel the climb
+rate's slow drift), and the surface takes up the rest of every change: a
+thing leaving the cone slowly now fades out, and nothing stays behind.
 """
 
 
@@ -66,6 +76,11 @@ class Height:
     # Frames arrive about ten a second, sometimes closer together. Over a very
     # short gap even noise looks fast, so speeds are judged over at least this.
     MIN_INTERVAL = 0.1
+
+    # With a climb rate: how far each reading pulls the height toward itself,
+    # per update. 0.1 at ten readings a second is a one-second time constant
+    # -- the climb rate's drift of a centimetre a second costs about 1 cm.
+    CORRECTION = 0.1
 
     def __init__(self, ground_lens_height, below_lens, max_climb_speed):
         self.ground_lens = float(ground_lens_height)
@@ -130,11 +145,21 @@ class Height:
         if jumped:
             # The ground changed under the drone. The lens is where its own
             # motion put it; the surface is whatever now puts it that far up.
-            surface = lens_now - above
-            self.surface = 0.0 if abs(surface) < self.FLOOR_TOLERANCE else surface
+            self._set_surface(lens_now - above)
             self.jumps += 1
+        elif rose is not None:
+            # The drone's own climb says where the lens is; the reading says
+            # it more precisely but cannot tell a slope from a climb. Lean on
+            # the climb, let the reading pull gently, and let the surface take
+            # up whatever is left.
+            pulled = lens_now + self.CORRECTION * ((above + self.surface) - lens_now)
+            self._set_surface(pulled - above)
 
         self.lens = max(self.ground_lens, above + self.surface)
         self._above = above
 
         return self.altitude
+
+    def _set_surface(self, surface):
+        """A surface this close to the floor IS the floor."""
+        self.surface = 0.0 if abs(surface) < self.FLOOR_TOLERANCE else surface

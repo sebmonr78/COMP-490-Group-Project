@@ -64,6 +64,9 @@ MIN_TAKEOFF_CLEARANCE = 0.10
 # How fast the drone climbs and descends, in metres per second.
 CLIMB_SPEED = 0.8
 
+# How far the gimbal can tilt the cameras up or down, in degrees.
+PITCH_LIMIT = 60.0
+
 # Near its target altitude the drone eases off instead of arriving at full
 # speed and stopping dead. The rate is per second: at EASE_RATE = 3.0 it
 # aims to close the remaining gap in about a third of a second, so the last
@@ -122,6 +125,11 @@ class Drone:
         # Nothing in this class reads it. It exists for whatever is mounted
         # on the drone, and the drone turns it to face the way it is going.
         self.heading = 0.0
+
+        # The gimbal's second axis: how far the cameras are tilted, degrees,
+        # POSITIVE LOOKS DOWN (the rig's and the IMU's convention). Level by
+        # default; tilt() moves it within PITCH_LIMIT either way.
+        self.pitch = 0.0
 
         # The height of the surface the drone is currently over. Updated as
         # it rolls, and re-checked as it flies, so it always knows what it
@@ -599,11 +607,21 @@ class Drone:
 
     @property
     def sensor_rotation(self):
-        """The gimbal's rotation: heading only, never the shell's tumble."""
+        """The gimbal's rotation: heading, then tilt -- never the shell's
+        tumble. Yaw outside pitch, the order Habitat composes sensors in."""
         return mn.Quaternion.rotation(
             mn.Deg(self.heading),
             mn.Vector3.y_axis(),
+        ) * mn.Quaternion.rotation(
+            mn.Deg(-self.pitch),
+            mn.Vector3.x_axis(),
         )
+
+    def tilt(self, degrees):
+        """Tilt the cameras by `degrees` (positive: further down), within
+        the gimbal's range. Returns the new pitch."""
+        self.pitch = max(-PITCH_LIMIT, min(PITCH_LIMIT, self.pitch + float(degrees)))
+        return self.pitch
 
     def _slide_candidates(self, centre, step):
         """The moves to try, best first: all of it, then one axis at a time."""

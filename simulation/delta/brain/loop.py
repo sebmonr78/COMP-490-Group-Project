@@ -213,8 +213,12 @@ class Brain:
         else:
             self.depth = depth_module.DA3Depth(s.depth, self.rectifier.baseline)
 
+        # The floor fixes Depth Anything's missing scale. True depth has none
+        # missing: rescaling it can only add error -- with a wrong height it
+        # once stretched every distance by 1.58.
         self.floor = depth_module.FloorScale(
-            self.lens_height, enabled=s.depth.scale_from_floor
+            self.lens_height,
+            enabled=s.depth.scale_from_floor and self.depth_source != "oracle",
         )
 
         if self.depth_source != "oracle":
