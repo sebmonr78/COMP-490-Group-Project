@@ -24,6 +24,7 @@ closes, and `rebuild` redraws the grid from every kept scan at its corrected
 pose, instead of leaving two copies of each wall.
 """
 
+import copy
 import math
 from dataclasses import dataclass
 
@@ -423,6 +424,14 @@ class OccupancyGrid:
     # -----------------------------------------------------------------
     # Saving
     # -----------------------------------------------------------------
+
+    def snapshot(self):
+        """A copy to save from while this one goes on being drawn in: the
+        layers copied (milliseconds), the scans shared (never changed)."""
+        twin = copy.copy(self)
+        twin.logodds, twin.solid, twin.walls = self.logodds.copy(), self.solid.copy(), self.walls.copy()
+        twin.scans = list(self.scans)
+        return twin
 
     def save(self, path):
         """Scans and grid to one .npz: polygons and hits flattened, with

@@ -28,6 +28,7 @@ One lock guards what the loops share: the grid and the route.
 
 import json
 import math
+import os
 import queue
 import shutil
 import threading
@@ -51,6 +52,7 @@ from delta.brain import (
     planner,
     rectify,
     replica as replica_module,
+    resources as resources_module,
     rooms as rooms_module,
 )
 from delta.wire import Closed
@@ -179,6 +181,9 @@ class Brain:
         self.ceiling = None            # replica.Ceiling, once one is seen
 
         self.rates = {name: Rate() for name in ("frames", "perception")}
+        self.usage = resources_module.Usage()
+        self._resources = {}
+        self._resources_at = 0.0
         self.timing = {}
         self.epoch = 0
         self.last_stamp = 0.0
@@ -291,21 +296,37 @@ class Brain:
             "looking for somewhere I recognise."
         )
 
-    def save(self):
+    def save(self, final=True):
+        """Write the brain's memory to disk.
+
+        `final` is the save at the end (or on Tab): the 3D replica is built
+        if it was not built as it went, and written as a .ply too. The
+        autosave every 30 s writes only what is needed to come back -- it
+        used to rebuild the replica and write the .ply every time, and to
+        compress the map while holding the lock perception needs: a stall
+        every 30 s.
+        """
+        started = time.monotonic()
+
         # The replica's views, to rebuild it from, and the replica itself as
         # a coloured point cloud any 3D viewer opens (MeshLab, CloudCompare).
         if self.replica.views:
-            # Not built as it went: built now, the task done.
-            if not self.replica_live:
+            if final and not self.replica_live:
                 self.replica.rebuild(dict(self.localizer.node_poses))
 
             self.replica.save(self.memory_dir / "replica.npz")
-            self.replica.save_ply(self.memory_dir / "replica.ply")
+
+            if final:
+                self.replica.save_ply(self.memory_dir / "replica.ply")
+
+        # A copy under the lock; the slow part, compressing, outside it.
+        with self.lock:
+            grid = self.grid.snapshot() if self.grid is not None else None
+
+        if grid is not None:
+            grid.save(self.memory_dir / "grid.npz")
 
         with self.lock:
-            if self.grid is not None:
-                self.grid.save(self.memory_dir / "grid.npz")
-
             latest = self.localizer.fixes.latest
 
             if self.saved_root_map is not None:
@@ -321,6 +342,8 @@ class Brain:
             }
 
             (self.memory_dir / "meta.json").write_text(json.dumps(meta, indent=1))
+
+        self.timing["save"] = (time.monotonic() - started) * 1000.0
 
     # -----------------------------------------------------------------
     # Running
@@ -735,8 +758,9 @@ class Brain:
                 saved_at = time.monotonic()
 
                 if self.grid is not None:
-                    self.save()
+                    self.save(final=False)
 
+            self._measure_resources()
             fields, arrays = self._snapshot()
 
             try:
@@ -776,6 +800,34 @@ class Brain:
              "ceiling": self.ceiling.heights.astype(np.float16)},
         )
         self.timing.update(replica_send=(time.monotonic() - started) * 1000.0)
+
+    def _measure_resources(self):
+        """Memory and CPU, every 2 s: the brain's process and RTAB-Map's,
+        and the size of what the brain keeps -- for the window."""
+        if time.monotonic() - self._resources_at < 2.0:
+            return
+
+        self._resources_at = time.monotonic()
+        bridge = getattr(getattr(self.localizer, "process", None), "pid", None)
+        megabytes = resources_module.megabytes
+
+        with self.lock:
+            grid = self.grid
+            grid_mb = 0.0 if grid is None else megabytes(grid.logodds, grid.solid, grid.walls) + sum(
+                megabytes(s.free, s.hits, s.walls, s.solid, s.solid_free) for s in grid.scans)
+            scans = 0 if grid is None else len(grid.scans)
+
+        cubes_mb, views_mb = self.replica.memory()
+        database = self.memory_dir / "rtabmap.db"
+
+        self._resources = {
+            "processes": self.usage.measure({"brain": os.getpid(), "rtabmap": bridge}),
+            "map_2d": {"mb": round(grid_mb, 1), "scans": scans},
+            "replica": {"cubes": len(self.replica), "mb": round(cubes_mb, 1),
+                        "views": len(self.replica.views), "views_mb": round(views_mb, 1)},
+            "rtabmap": {"nodes": len(getattr(self.localizer, "node_poses", None) or {}),
+                        "db_mb": round(database.stat().st_size / 1e6, 1) if database.exists() else 0.0},
+        }
 
     def _ceiling_here(self, pose):
         if self.ceiling is None or pose is None:
@@ -921,6 +973,7 @@ class Brain:
             ),
             "sources": {"pose": self.pose_source, "depth": self.depth_source},
             "replica": {"live": self.replica_live, "views": len(self.replica.views)},
+            "resources": self._resources,
             "relocalizing": self.saved_root_map is not None,
         }
 

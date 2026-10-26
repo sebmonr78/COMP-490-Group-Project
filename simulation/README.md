@@ -366,7 +366,10 @@ On the left is the house, seen from behind the drone. In the middle is the map
 two disagree is the brain's error. On the right is the brain's 3D replica,
 with the ceiling taken off to see into the rooms -- only in the picture: the
 brain keeps the ceiling and knows how high it is (the height box shows it next
-to the truth).
+to the truth). Next to the height box, RESOURCES shows what it all costs,
+every 2 s: memory and CPU of the window, the brain and RTAB-Map (CPU as `top`
+shows it: 250% is two and a half cores), the GPU's load, memory and power,
+and the size of the 2D map, the 3D replica and RTAB-Map's database.
 
 | Key | Action |
 |---|---|
