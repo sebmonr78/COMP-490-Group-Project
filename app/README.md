@@ -20,6 +20,9 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+If the venv comes out with no `pip` in it (Ubuntu without the `python3-venv`
+package), make it with conda's Python instead: `~/miniconda3/bin/python3 -m venv venv`.
+
 On Windows the activate line is `venv\Scripts\activate`. If it worked you'll see `(venv)` at the start of your terminal line.
 
 ## Running it
@@ -58,15 +61,18 @@ Go to http://127.0.0.1:8000 and you should see the page. The login page is at ht
 
 ## Running the simulations from the page
 
-The Simulations section on the page has a Run button for each of the scripts in `../simulation`:
+The Simulations section on the page has a Run button for each of these, from `../simulation` (the list is `SIMULATIONS` in `simulations.py`):
 
-- **Open environment** runs `demo/open_environment.py`, with two buttons:
+- **DELTA** runs `run_drone.sh --fresh --depth oracle`: the drone and its brain, the map, the rooms and the 3D replica, as you drive. Two buttons:
   - **Run in browser** shows the window on the page, and your keyboard and mouse control it. Click inside it first.
   - **Run on server** opens it on the server's own monitor instead.
+  Stop shuts it down as Esc would: the brain saves its map first.
+- **Brain checks** runs `tests/test_brain.py`: the brain's 21 checks, including that it cannot cheat.
+- **Simple drive** runs `demo/open_environment.py`, the first demo: drive the drone next to the true layout, no brain. Same two buttons.
 - **Drone tests** runs `tests/test_drone.py`.
 - **Check setup** runs `config/check_setup.py`.
 
-The app doesn't import Habitat. It runs each script as `conda run -n habitat python <script>` from the `simulation` folder, and the page shows what the script prints. So for the buttons to work:
+The app doesn't import Habitat. It runs each script as `conda run -n habitat python <script>` from the `simulation` folder -- or, for DELTA, its launcher, which starts the brain (conda env `brain`) and the window (env `habitat`) itself -- and the page shows what they print. So for the buttons to work:
 
 - run uvicorn on the machine (or WSL) where the simulation already works (`simulation/README.md`)
 - start it from a terminal where `conda activate habitat` works, so it can find conda and `HABITAT_DATA_PATH`

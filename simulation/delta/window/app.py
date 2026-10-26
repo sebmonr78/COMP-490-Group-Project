@@ -56,6 +56,7 @@ import collections
 import contextlib
 import math
 import os
+import signal
 import threading
 import time
 import warnings
@@ -474,6 +475,11 @@ class DroneApp(Examiner):
     # -----------------------------------------------------------------
 
     def run(self, display):
+        # Stopped from outside -- the web page's Stop sends SIGTERM: finish
+        # the loop and shut down as on Esc (the brain saves its map, the
+        # camera process is closed) instead of dying mid-frame.
+        signal.signal(signal.SIGTERM, lambda *_: setattr(self, "running", False))
+
         self.display = display
         self.screen = pygame.Surface(WINDOW)
         self.screen.fill(BACKGROUND)

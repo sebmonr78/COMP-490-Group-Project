@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Each person makes their own (see app/README.md, database/README.md)
+venv/
+*.db
+*.db-wal
+*.db-shm

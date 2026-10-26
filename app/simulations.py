@@ -45,14 +45,32 @@ PROJECT_CONFIG = SIMULATION_DIR / "config" / "project.json"
 # you press P, so an unlimited log would grow for as long as it runs.
 MAX_LINES = 2000
 
-# What the page can run. Paths are relative to the simulation folder.
+# What the page can run, in the order shown. Paths are relative to the
+# simulation folder. A "script" runs with the habitat env's Python; a
+# "command" is run as it is -- DELTA's launcher starts its two processes, the
+# brain (env `brain`) and the window (env `habitat`), itself.
 SIMULATIONS = {
+    "delta": {
+        "title": "DELTA (interactive)",
+        "command": ["bash", "run_drone.sh", "--fresh", "--depth", "oracle"],
+        "description": "The drone and its brain: it finds where it is (RTAB-Map), builds the "
+                       "2D map, the rooms and the 3D replica as you drive. Arrows drive, "
+                       "1/0 fly and land, R roams. Depth is the simulator's, so what is "
+                       "tested is the brain's own localization and mapping.",
+        "interactive": True,
+    },
+    "brain-checks": {
+        "title": "Brain checks",
+        "script": "tests/test_brain.py",
+        "description": "The brain's 21 checks: that it cannot cheat (no Habitat, only what "
+                       "real sensors measure), and its map, rooms, replica and height.",
+        "interactive": False,
+    },
     "open-environment": {
-        "title": "Open environment (interactive)",
+        "title": "Simple drive (the first demo, no brain)",
         "script": "demo/open_environment.py",
-        "description": "Opens the HSSD house and lets you drive the drone. "
-                       "In the browser: shown on this page. On the server: opens "
-                       "on the server's own monitor.",
+        "description": "Opens the HSSD house and lets you drive the drone next to the true "
+                       "layout -- no brain, no mapping.",
         "interactive": True,
     },
     "drone-tests": {
@@ -246,9 +264,12 @@ def start_simulation(sim_id: str, where: str = "browser"):
                 raise HTTPException(status_code=503, detail=f"Could not show it in the browser: {error}")
             env = screen.environment(env)
 
+        simulation = SIMULATIONS[sim_id]
+        argv = simulation["command"] if "command" in simulation else command + [simulation["script"]]
+
         try:
             process = subprocess.Popen(
-                command + [SIMULATIONS[sim_id]["script"]],
+                argv,
                 cwd=SIMULATION_DIR,
                 env=env,
                 stdin=subprocess.DEVNULL,

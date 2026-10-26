@@ -575,6 +575,10 @@ delta/window/link.py        the window's end of the cable
 delta/window/script.py      test drives from tests/scripts/*.json
 delta/window/view3d.py      draws the 3D replica panel
 
+THE FIRST DEMO -- the web app's "Simple drive" runs it
+demo/open_environment.py    drive the drone next to the true layout; no brain
+delta/navigation.py         routes on the true navmesh, for that demo
+
 config/project.json         env name, versions, data paths, scene, drone size
 config/rig.json             the cameras, as hardware: baseline, lens, mounting
 config/brain.json           the brain's settings, each with why
