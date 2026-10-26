@@ -50,6 +50,7 @@ import queue
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 
 os.environ.setdefault("SDL_FRAMEBUFFER_ACCELERATION", "0")
@@ -88,7 +89,7 @@ STATUS_TOP = WINDOW[1] - 26
 FEED = (600, 375)
 LOG_LEFT = 16 + 2 * FEED[0] + 10
 HEIGHT_BOX_TOP = STRIP_TOP + 24
-HEIGHT_BOX_HEIGHT = 110
+HEIGHT_BOX_HEIGHT = 131
 
 # A 30 cm drone, not a walking adult. Slower, because the tracker matches
 # features BETWEEN frames: at 1 m/s and 10 frames a second it moves 10 cm,
@@ -109,6 +110,15 @@ CHASE_NEAREST = 0.45                # never closer than this to the drone
 CHASE_PITCH = -22.0                 # the free camera's starting tilt
 
 TILT_SPEED = 45.0                   # degrees a second, holding I or K
+
+# The replica panel takes the ceiling off so the rooms can be seen into, like
+# a dollhouse: every cube within CEILING_MARGIN of the ceiling the BRAIN found
+# over it (or above) is not drawn -- the brain keeps them all. [ and ] step
+# through, from low to high: a flat cut at any height, the ceiling off (the
+# start), and everything drawn.
+CEILING_MARGIN = 0.15
+REPLICA_CUT_STEP = 0.1
+REPLICA_CUT_TOP = 3.0
 
 KIND_COLOURS = {
     "reply": (110, 210, 255),
@@ -208,7 +218,9 @@ class BrainLink:
                 elif message.kind == "replica":
                     # (cube indices, colours, the fields): a new tuple each
                     # time, which is also how the view knows to redraw.
-                    self.replica = (message.arrays["index"], message.arrays["colour"], message.fields)
+                    info = dict(message.fields)
+                    info["ceiling"] = message.arrays.get("ceiling")
+                    self.replica = (message.arrays["index"], message.arrays["colour"], info)
                 elif message.kind == "ready":
                     self.ready = True
 
@@ -355,6 +367,8 @@ class DroneApp:
         self.show_truth = True
         self.show_rooms = True
         self.orbit = OrbitView()
+        self.replica_cut = "ceiling"   # a height, "ceiling", or None: all
+        self._replica_shown = None     # (key, centres, colours) last drawn
         self._dragging = None
         self.free_camera = False
         self.autopilot = False
@@ -603,6 +617,27 @@ class DroneApp:
         elif key == pygame.K_f:
             self.orbit.follow = not self.orbit.follow
             self.note(f"Replica view {'follows the drone' if self.orbit.follow else 'stays put'}.")
+        elif key in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET):
+            # In order from low to high: a flat cut, the ceiling off, all.
+            # [ steps down that line, ] steps up it.
+            down = key == pygame.K_LEFTBRACKET
+            ceiling = self._typical_ceiling()
+            top = REPLICA_CUT_TOP if ceiling is None else ceiling - CEILING_MARGIN
+
+            if self.replica_cut is None:
+                self.replica_cut = "ceiling" if down else None
+            elif self.replica_cut == "ceiling":
+                self.replica_cut = round(top - REPLICA_CUT_STEP, 2) if down else None
+            else:
+                cut = self.replica_cut + (-REPLICA_CUT_STEP if down else REPLICA_CUT_STEP)
+                self.replica_cut = "ceiling" if cut > top else max(0.2, round(cut, 2))
+
+            if self.replica_cut is None:
+                self.note("Replica: everything shown, ceiling too.")
+            elif self.replica_cut == "ceiling":
+                self.note("Replica: the ceiling taken off.")
+            else:
+                self.note(f"Replica: cut flat at {self.replica_cut:.1f} m.")
         elif key == pygame.K_o and not self.free_camera:
             self.world.drone.pitch = 0.0
             self.note("Cameras level.")
@@ -1077,10 +1112,9 @@ class DroneApp:
                                 (80, 220, 110), 7))
 
         if replica is not None:
-            index, colour, info = replica
-            centres = (index.astype(np.float32) + 0.5) * float(info["voxel"])
-            image = self.orbit.render(centres, colour, (PANEL, TOP), float(info["voxel"]),
-                                      markers, version=id(replica))
+            centres, colour = self._replica_to_draw(replica)
+            image = self.orbit.render(centres, colour, (PANEL, TOP), float(replica[2]["voxel"]),
+                                      markers, version=(id(replica), self.replica_cut))
         else:
             image = self.orbit.render(np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint8),
                                       (PANEL, TOP), markers=markers, version=None)
@@ -1093,6 +1127,83 @@ class DroneApp:
         self._text(count + "drag: turn   scroll: zoom   F: "
                    + ("following the drone" if self.orbit.follow else "fixed"),
                    (REPLICA_X + 12, 34), self.small, (170, 175, 185))
+
+        # What the brain knows of the ceiling, and what the view hides.
+        ceiling = self._typical_ceiling()
+        known = "ceiling: not seen yet" if ceiling is None else f"ceiling: {ceiling:.2f} m (the brain's)"
+        if self.replica_cut is None:
+            shown = "showing all"
+        elif self.replica_cut == "ceiling":
+            shown = "ceiling taken off"
+        else:
+            shown = f"cut flat at {self.replica_cut:.1f} m"
+
+        self._text(f"{known}   view: {shown}   [ ]: lower / raise",
+                   (REPLICA_X + 12, 54), self.small, (190, 170, 120))
+
+    def _replica_to_draw(self, replica):
+        """The cubes the panel draws: all of them, less the ceiling or what
+        is above a flat cut. Worked out once per replica and cut."""
+        key = (id(replica), self.replica_cut)
+
+        if self._replica_shown is not None and self._replica_shown[0] == key:
+            return self._replica_shown[1:]
+
+        index, colour, info = replica
+        centres = (index.astype(np.float32) + 0.5) * float(info["voxel"])
+
+        if self.replica_cut == "ceiling":
+            limit = self._ceiling_over(centres[:, :2], info)
+
+            if limit is not None:
+                keep = centres[:, 2] < limit - CEILING_MARGIN
+                centres, colour = centres[keep], colour[keep]
+        elif self.replica_cut is not None:
+            keep = centres[:, 2] < self.replica_cut
+            centres, colour = centres[keep], colour[keep]
+
+        self._replica_shown = (key, centres, colour)
+        return centres, colour
+
+    @staticmethod
+    def _ceiling_over(xy, info):
+        """The brain's ceiling height over each point, or None if it has
+        seen no ceiling at all. A patch it has not seen one in takes the
+        highest of its neighbours', and failing that the usual height."""
+        heights = info.get("ceiling")
+
+        if heights is None or np.all(np.isnan(heights)):
+            return None
+
+        heights = heights.astype(np.float32)
+        rows, cols = heights.shape
+
+        # Each patch and its eight neighbours, the highest seen.
+        padded = np.pad(heights, 1, constant_values=np.nan)
+        stack = np.stack([padded[r:r + rows, c:c + cols] for r in range(3) for c in range(3)])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            near = np.nanmax(stack, axis=0)
+        near = np.where(np.isnan(near), np.nanmedian(heights), near)
+
+        cell, origin = float(info["ceiling_cell"]), np.asarray(info["ceiling_origin"], np.float32)
+        col = np.floor((xy[:, 0] - origin[0]) / cell).astype(np.int64)
+        row = np.floor((xy[:, 1] - origin[1]) / cell).astype(np.int64)
+        inside = (col >= 0) & (col < cols) & (row >= 0) & (row < rows)
+
+        limit = np.full(len(xy), np.nanmedian(heights), np.float32)
+        limit[inside] = near[row[inside], col[inside]]
+        return limit
+
+    def _typical_ceiling(self):
+        """The brain's usual ceiling height, or None until it has seen one."""
+        replica = self.brain.replica if self.brain else None
+        heights = replica[2].get("ceiling") if replica else None
+
+        if heights is None or np.all(np.isnan(heights)):
+            return None
+
+        return float(np.nanmedian(heights.astype(np.float32)))
 
     def _place_chase_camera(self):
         """Behind and above the drone, looking at it -- at any height, and
@@ -1506,12 +1617,15 @@ class DroneApp:
             stats.get("altitude_frame"), (self._true_altitude(), self._surface_below())
         )
         true_surface = max(0.0, true_surface or 0.0)
+        ceiling, true_ceiling = stats.get("ceiling"), self._true_ceiling()
 
         rows = [
             ("HEIGHT", "brain", "truth"),
             ("above the floor", f"{altitude:.2f} m", f"{true_altitude:.2f} m"),
             ("above what is below", f"{altitude - surface:.2f} m", f"{true_altitude - true_surface:.2f} m"),
             ("what is below (0 = floor)", f"{surface:.2f} m", f"{true_surface:.2f} m"),
+            ("ceiling (above the floor)", "not seen" if ceiling is None else f"{ceiling:.2f} m",
+             "none" if true_ceiling is None else f"{true_ceiling:.2f} m"),
         ]
 
         # At the top of the log panel, clear of the 3D view.
@@ -1527,7 +1641,7 @@ class DroneApp:
 
         pitch = self.world.drone.pitch
         tilt = "level" if abs(pitch) < 0.5 else f"{abs(pitch):.0f} deg {'down' if pitch > 0 else 'up'}"
-        self._text(f"cameras: {tilt}   (I up, K down, O level)", (x + 8, top + 4 + 4 * 21),
+        self._text(f"cameras: {tilt}   (I up, K down, O level)", (x + 8, top + 4 + len(rows) * 21),
                    self.small, (190, 170, 120))
 
     def _true_rooms(self):
@@ -1738,6 +1852,23 @@ class DroneApp:
             return None
 
         return round(float(centre.y) - down - self.floor_height, 3)
+
+    def _true_ceiling(self, xy=None):
+        """True height above the floor of the ceiling straight over the
+        drone (or over a point, east/north in the true frame), None if
+        nothing is over it -- for scoring the brain's ceiling, never sent."""
+        if xy is None:
+            origin = self.world.drone.object.translation
+            ignore = self.world.drone.object.object_id
+        else:
+            origin, ignore = mn.Vector3(float(xy[0]), self.floor_height + 1.4, -float(xy[1])), None
+
+        up = first_hit(self.world.simulator, origin, mn.Vector3(0.0, 1.0, 0.0), 10.0, ignore)
+
+        if up is None:
+            return None
+
+        return round(float(origin.y) + up - self.floor_height, 3)
 
     def _pose_error(self, state):
         if "pose" not in state or not self.alignment.ready:
@@ -2000,6 +2131,7 @@ class DroneApp:
             "completeness": round(completeness, 3),
             "f_score": round(2 * precision * completeness / max(precision + completeness, 1e-9), 3),
             "pose_error_m": round(self._pose_error(self.brain.state)[0], 3) if self.brain.state and self._pose_error(self.brain.state) else None,
+            "ceiling": self._score_ceiling(info),
         }
         print(f"[replica] {json.dumps(result)}", flush=True)
 
@@ -2025,6 +2157,42 @@ class DroneApp:
         picture[pixels(cubes[to_truth < 0.05])] = (80, 200, 90)
         picture[pixels(cubes[to_truth >= 0.05])] = (40, 40, 230)
         cv2.imwrite(str(folder / "replica" / f"{name}.png"), picture)
+
+    def _score_ceiling(self, info):
+        """The brain's ceiling against the real one: for every patch the
+        brain has a ceiling for, a ray straight up from 1.4 m at the patch's
+        centre, put in the true frame by the alignment. Median error, and
+        the share within 10 cm (two cube layers)."""
+        heights = info.get("ceiling")
+
+        if heights is None or np.all(np.isnan(heights)):
+            return {"patches": 0}
+
+        heights = heights.astype(np.float32)
+        cell, origin = float(info["ceiling_cell"]), np.asarray(info["ceiling_origin"], np.float64)
+        errors, brain, truth = [], [], []
+
+        for row, col in zip(*np.nonzero(~np.isnan(heights))):
+            centre = origin + (np.array([col, row]) + 0.5) * cell
+            true = self._true_ceiling(self.alignment.point(centre))
+
+            if true is not None:
+                errors.append(float(heights[row, col]) - true)
+                brain.append(float(heights[row, col]))
+                truth.append(true)
+
+        if not errors:
+            return {"patches": int((~np.isnan(heights)).sum()), "scored": 0}
+
+        errors = np.abs(np.array(errors))
+        return {
+            "patches": int((~np.isnan(heights)).sum()),
+            "scored": len(errors),
+            "median_error_m": round(float(np.median(errors)), 3),
+            "within_10cm": round(float((errors <= 0.10).mean()), 3),
+            "brain_typical_m": round(float(np.median(brain)), 2),
+            "true_typical_m": round(float(np.median(truth)), 2),
+        }
 
     def _true_solid(self):
         """Where something really stands between just off the floor and

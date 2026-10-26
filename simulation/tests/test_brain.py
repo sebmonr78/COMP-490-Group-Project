@@ -536,6 +536,50 @@ def the_replica_puts_a_red_wall_where_it_is():
     return f"{int(wall.sum())} red cubes on the wall, up to {top:.2f} m; moved with the node"
 
 
+def the_brain_knows_how_high_the_ceiling_is():
+    """Hovering 1 m up under a 2.4 m ceiling and turning round: the brain's
+    ceiling is 2.4 m over it, and unknown far away. Then, in cubes: a wall
+    alone is not a ceiling, and a wardrobe top under the ceiling does not
+    lower it."""
+    from delta.brain import replica as replica_module
+
+    settings = brain_config.load().replica
+    lens = 1.0
+    room = _room(lens, ceiling=2.4 - lens)
+    rgb = np.zeros(room.depth.shape + (3,), np.uint8)
+    replica = replica_module.Replica(settings)
+
+    for turn in range(4):
+        view = replica_module.make_view(room.depth, room.K, rgb, lens, settings, anchor=turn)
+        c, s = math.cos(turn * math.pi / 2), math.sin(turn * math.pi / 2)
+        pose = np.eye(4)
+        pose[:2, :2] = [[c, -s], [s, c]]
+        replica.add(view, pose)
+
+    centres, _ = replica.cloud()
+    ceiling = replica_module.find_ceiling(centres, replica.voxel, settings.ceiling)
+    here, typical = ceiling.at((0.0, 0.0)), ceiling.typical()
+
+    assert here is not None and abs(here - 2.4) <= 0.05, f"the ceiling over the drone: {here}"
+    assert abs(typical - 2.4) <= 0.05, f"the usual ceiling: {typical:.2f} m"
+    assert ceiling.at((20.0, 0.0)) is None, "a ceiling 20 m away, where nothing was seen"
+
+    # Cubes: a wall 2.4 m high along x = 0 with nothing over it, and 3 m
+    # away a wardrobe top at 1.9 m with the ceiling at 2.4 m over both.
+    v = replica.voxel
+    grid = np.arange(0.0, 1.0, v) + v / 2
+    wall = np.array([(0.0, y, z) for y in grid for z in np.arange(0.0, 2.4, v) + v / 2])
+    top = np.array([(3.0 + x, y, z) for x in grid for y in grid for z in (1.9 + v / 2, 2.4 + v / 2)])
+    ceiling = replica_module.find_ceiling(np.concatenate([wall, top]).astype(np.float32), v, settings.ceiling)
+    over_wall = ceiling.heights[~np.isnan(ceiling.heights)]
+
+    assert ceiling.at((0.0, 0.5)) is None, f"a wall alone made a ceiling at {ceiling.at((0.0, 0.5))}"
+    assert abs(ceiling.at((3.5, 0.5)) - 2.4) <= 0.05, f"over the wardrobe: {ceiling.at((3.5, 0.5))}"
+    assert np.all(np.abs(over_wall - 2.4) <= 0.05), f"a patch took the wardrobe top: {over_wall}"
+
+    return f"ceiling over the drone {here:.2f} m (true 2.40); wall alone: none; wardrobe under it: 2.40"
+
+
 # ---------------------------------------------------------------------
 # Height, from the rangefinder
 # ---------------------------------------------------------------------
@@ -780,6 +824,7 @@ TESTS = [
     a_flying_drone_does_not_clear_the_floor_beneath_it,
     a_loop_closure_redraws_the_map,
     the_replica_puts_a_red_wall_where_it_is,
+    the_brain_knows_how_high_the_ceiling_is,
     the_height_survives_flying_over_a_table,
     something_low_at_the_edge_of_the_cone_leaves_no_trace,
     climbing_up_stairs_is_not_taken_for_floor,

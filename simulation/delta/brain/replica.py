@@ -288,6 +288,85 @@ class Replica:
             out.write(record.tobytes())
 
 
+@dataclass
+class Ceiling:
+    """How high the ceiling is above the floor, patch by patch.
+
+    heights[row, col] is the patch whose corner is origin + (col, row) * cell;
+    NaN where no ceiling has been seen."""
+
+    origin: np.ndarray               # x, y of patch (0, 0)'s corner, metres
+    cell: float
+    heights: np.ndarray              # rows (y) x cols (x), metres above the floor
+
+    def at(self, xy, reach=3):
+        """The ceiling over a point, or None if none has been seen near it.
+
+        A level camera never sees straight up: the patch over the drone is
+        usually one it saw from further back, but not always. So: the
+        patch's own, or failing that the nearest ring of patches round it
+        (up to `reach` patches out) that has one -- the LOWEST there, the
+        safe answer to "how high can I fly here"."""
+        col, row = np.floor((np.asarray(xy, np.float64) - self.origin) / self.cell).astype(int)
+        rows, cols = self.heights.shape
+
+        for ring in range(reach + 1):
+            if not (-ring <= row < rows + ring and -ring <= col < cols + ring):
+                continue
+
+            window = self.heights[max(0, row - ring):row + ring + 1, max(0, col - ring):col + ring + 1]
+
+            if window.size and not np.all(np.isnan(window)):
+                return float(np.nanmin(window))
+
+        return None
+
+    def typical(self):
+        """The usual ceiling height across what has been seen, or None."""
+        known = self.heights[~np.isnan(self.heights)]
+        return float(np.median(known)) if len(known) else None
+
+
+def find_ceiling(centres, voxel, settings):
+    """The ceiling, from the cubes alone.
+
+    A ceiling is a big flat layer of cubes high up. In a 0.5 m patch a whole
+    5 cm layer is 100 cubes: a ceiling seen from below fills most of one; a
+    wall running through the patch puts only ten in each layer, a lamp or
+    the top of a door frame a handful. So in each patch the ceiling is the
+    highest layer above settings.lowest holding at least settings.min_cubes
+    cubes -- the highest, because indoors nothing is above the ceiling, and a
+    shelf or wardrobe top under it is a lower full layer. Its height is the
+    bottom face of that layer: where the drone would touch it.
+
+    What flying needs (how high it can go here), and what the window takes
+    off to look into the rooms.
+    """
+    cell = float(settings.cell)
+    high = centres[centres[:, 2] > float(settings.lowest)]
+
+    if not len(high):
+        return Ceiling(np.zeros(2), cell, np.full((1, 1), np.nan, np.float32))
+
+    patches = np.floor(high[:, :2] / cell).astype(np.int64)
+    layers = np.floor(high[:, 2] / voxel).astype(np.int64)
+
+    corner = patches.min(axis=0)
+    patches -= corner
+    cols, rows = patches.max(axis=0) + 1
+
+    # Cubes in each (patch, layer); layers stay below 10 000 (500 m).
+    patch = patches[:, 1] * cols + patches[:, 0]
+    keys, counts = np.unique(patch * 10_000 + layers, return_counts=True)
+    full = keys[counts >= int(settings.min_cubes)]
+
+    top = np.full(rows * cols, -1, np.int64)
+    np.maximum.at(top, full // 10_000, full % 10_000)
+
+    heights = np.where(top >= 0, top * voxel, np.nan).astype(np.float32).reshape(rows, cols)
+    return Ceiling(corner.astype(np.float64) * cell, cell, heights)
+
+
 def _pack(index):
     """N x 3 signed cube indices -> N packed int64 keys."""
     shifted = (index + OFFSET) & MASK
