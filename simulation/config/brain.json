@@ -1,0 +1,266 @@
+{
+ "_comment": [
+  "DELTA's brain: localization, depth, and the map it builds for itself.",
+  "",
+  "Ported from the Spatial Memory Glasses project (spatial-agent-12), whose",
+  "settings these are. Every number here was tuned there against Habitat's",
+  "navmesh, so they are measurements rather than guesses -- except the ones",
+  "under `drone`, which are this robot's own.",
+  "",
+  "Sections the glasses had and DELTA does not: detection (YOLOE), objects",
+  "(object memory), hazard (the blind-wearer beeps), guidance, speech and",
+  "language (Piper and Gemma). DELTA maps; it does not talk to anybody."
+ ],
+ "link": {
+  "host": "127.0.0.1",
+  "port": 47569
+ },
+ "cameras": {
+  "frame_rate": 10,
+  "_frame_rate": [
+   "Stereo pairs per second from the sim. Odometry sees every one; depth,",
+   "detection and the hazard loop each take the newest when they are free."
+  ]
+ },
+ "localization": {
+  "bridge": "build/rtabmap_bridge/rtabmap_bridge",
+  "keyframe_every": 0.3,
+  "_keyframe_every": "seconds between frames offered to RTAB-Map's map; odometry sees all",
+  "parameters": {
+   "Reg/Force3DoF": "true",
+   "Odom/Strategy": "0",
+   "Rtabmap/DetectionRate": "0",
+   "RGBD/LinearUpdate": "0.1",
+   "RGBD/AngularUpdate": "0.1",
+   "RGBD/OptimizeFromGraphEnd": "false",
+   "Mem/InitWMWithAllNodes": "true",
+   "Mem/BinDataKept": "false"
+  },
+  "_parameters": [
+   "Force3DoF: a walking person stays level, so x, y and heading only.",
+   "OptimizeFromGraphEnd false: the oldest node stays put when a loop",
+   "closes, so a map saved last session keeps its coordinates.",
+   "InitWMWithAllNodes: every remembered place is a candidate for",
+   "recognising where we are, not just the most recent ones."
+  ],
+  "relocalize_within": 30.0,
+  "_relocalize_within": "seconds to recognise last session's map before starting a new one",
+  "lookalike": {
+   "_comment": [
+    "How far a loop closure may move the drone before it is taken for a",
+    "lookalike -- a place that merely resembles one already mapped -- and",
+    "thrown out. Allowed = 0.5 m + jump_per_metre x metres travelled +",
+    "jump_per_lost_frame x frames tracking was lost, all since the last",
+    "trusted closure.",
+    "",
+    "jump_per_metre 0.02: RTAB-Map drifts about 1% here (0.33 m over 31 m,",
+    "0.59 m over 58 m, tests/scripts/baseline.json and diagnose.json), so",
+    "twice that. The glasses used 0.05.",
+    "jump_per_lost_frame 0.10: the drone's top speed of 0.8 m/s for one",
+    "0.1 s frame is 0.08 m, plus margin. The glasses used 0.25, sized to a",
+    "person walking blind, and after 18 lost frames that let a 3.5 m false",
+    "closure through."
+   ],
+   "jump_per_metre": 0.02,
+   "jump_per_lost_frame": 0.1
+  }
+ },
+ "depth": {
+  "model": "depth-anything/DA3-LARGE-1.1",
+  "process_res": 504,
+  "max_range": 6.0,
+  "scale_from_floor": true,
+  "_scale_from_floor": [
+   "DA3 two-view read ~12% short in #11. The floor is the fix: the lens",
+   "height above it is known, so the distance DA3 reports to it gives the",
+   "missing scale on every frame. Uncorrected, the floor would sit 20 cm",
+   "up and every frame would mark it as an obstacle."
+  ]
+ },
+ "occupancy": {
+  "resolution": 0.05,
+  "size": 60.0,
+  "max_range": 4.0,
+  "floor_band": 0.08,
+  "obstacle_band": [
+   0.08,
+   0.38
+  ],
+  "_obstacle_band": [
+   "Heights above the floor that stop a ROLLING drone: from its climb limit",
+   "(0.08 m, project.json max_climb) to a little over its own height (0.30 m",
+   "plus 8 cm). This grid is the rolling map -- it answers 'can the drone",
+   "roll here' -- and it is scored against the drone's navmesh, which asks",
+   "exactly that.",
+   "",
+   "It was the glasses' 0.15-1.9 m, sized to hit a standing adult, with the",
+   "note 'lamps and ceilings are above it'. In this house they are not: the",
+   "ceiling is about 1.97 m, 7 cm above the cut-off. A camera 15 cm off the",
+   "floor looking up at 47 degrees sees ceiling for metres around it, and a",
+   "few cm of tilt or lens-height error dragged those points under 1.9 m,",
+   "where they were stamped onto the empty floor below. Measured: with",
+   "PERFECT pose and depth, 32.7% of clear floor was marked solid, and 98%",
+   "of those cells had nothing above them but a ceiling at 1.95-2.05 m",
+   "(tools/explain_phantoms.py). Overhead things -- table tops, lamps, the",
+   "ceiling -- are the 2.5D map's job, not this one's."
+  ],
+  "hit": 0.5,
+  "miss": -0.6,
+  "limits": [
+   -2.0,
+   3.5
+  ],
+  "occupied_above": 1.2,
+  "free_below": -0.4,
+  "_evidence": [
+   "An obstacle needs about three sightings; one clear view of the floor",
+   "clears a cell. Tuned on a recorded walk against Habitat's navmesh: the",
+   "first guess (one hit marked a cell, hit 0.85, threshold 0.7) left 6.2%",
+   "phantom obstacles in walkable space and 8 of 21 test routes",
+   "impossible; these settings, 2.0% and 21 of 21."
+  ],
+  "keyframe_spacing": [
+   0.2,
+   10.0
+  ],
+  "_keyframe_spacing": "metres and degrees of movement before another view is kept for redrawing the map",
+  "solid": {
+   "_comment": [
+    "What is THERE, at any height up to just under the ceiling: the map as",
+    "you would draw it, and the white in the window. The glasses' map was",
+    "this (0.15 to 1.9 m: anything a person walks into) and showed tables,",
+    "sofas and walls as solid. The rolling map above (obstacle_band) asks",
+    "something narrower -- where the ball can roll -- and from 15 cm up a",
+    "table is only its legs to it. Both are kept: this one to look at and",
+    "to fly by, that one to roll by. Its free floor stops at the first",
+    "thing at any height, so floor seen under a table is not free here.",
+    "",
+    "1.8, not the glasses' 1.9: ceilings in HSSD houses can be 1.97 m, and",
+    "a 1.9 m top let the ceiling in as phantom walls (see obstacle_band)."
+   ],
+   "band": [0.08, 1.8]
+  },
+  "walls": {
+   "_comment": [
+    "The floor plan, for splitting the map into rooms (rooms.py): is",
+    "there something WALL-HIGH in this cell? `band` is the heights that",
+    "count, above the floor: from just over a sofa back, a kitchen counter",
+    "or a chair (0.9 m) to just under a 2 m ceiling (1.8 m). Walls, door",
+    "frames and tall cupboards reach it; tables, sofas, beds and chairs",
+    "do not -- and those are what made room maps from a robot's-eye view",
+    "useless, splitting one living room into four around its furniture.",
+    "",
+    "Floor seen in a cell votes against a wall there (miss); weaker than",
+    "a hit, because the floor under a high shelf is seen too."
+   ],
+   "band": [0.9, 1.8],
+   "hit": 0.4,
+   "miss": -0.2,
+   "limits": [-2.0, 3.0],
+   "wall_above": 0.8
+  }
+ },
+ "replica": {
+  "_comment": [
+   "The place in 3D and colour (replica.py): every kept view's surface",
+   "points, binned into cubes `voxel` metres on a side, each the average",
+   "colour of what was seen in it. A cube is shown once seen min_seen",
+   "times, so one stray depth pixel leaves no speck. Points beyond",
+   "max_range are left out -- depth is least sure far away -- and so is",
+   "anything above max_height (sky through a window, a vaulted ceiling",
+   "the map has no use for). step: every step-th depth pixel. Sent to",
+   "the window every every_seconds when it has changed. Each view is",
+   "thinned to one point per `thin`-metre cell before it is kept.",
+   "",
+   "live: build the cubes as the drone goes and send them every",
+   "every_seconds. false: only keep the views -- the cheap part, a few ms",
+   "each -- and build the cubes when asked (B in the window, or a script's",
+   "build_replica) and when the map is saved. The replica is for people to",
+   "look at; nothing the drone does needs it while it flies."
+  ],
+  "live": true,
+  "voxel": 0.05,
+  "thin": 0.025,
+  "min_seen": 2,
+  "max_range": 4.0,
+  "max_height": 3.0,
+  "step": 2,
+  "every_seconds": 3.0,
+  "ceiling": {
+   "_comment": [
+    "The ceiling, from the cubes (replica.find_ceiling): in each cell x cell",
+    "patch, the highest 5 cm layer above `lowest` metres holding at least",
+    "min_cubes cubes (a whole layer of a 0.5 m patch is 100)."
+   ],
+   "cell": 0.5,
+   "lowest": 1.4,
+   "min_cubes": 30
+  }
+ },
+ "rooms": {
+  "_comment": [
+   "Splitting the floor plan into rooms, the way robot vacuums do: the",
+   "distance-transform method of Bormann et al., ICRA 2016 (rooms.py).",
+   "",
+   "door_width: openings narrower than this, in metres, can be doors. The",
+   "free space is shrunk until it splits at openings up to this wide; a",
+   "wider gap -- an open-plan kitchen into a living room -- joins.",
+   "min_room: pieces smaller than this, m2, are merged into a neighbour.",
+   "every_seconds: how often to re-split. The map changes slowly."
+  ],
+  "door_width": 1.2,
+  "max_room_width": 4.0,
+  "min_room": 2.0,
+  "every_seconds": 2.0
+ },
+ "navigation": {
+  "clearance": 0.25,
+  "comfort": 0.6,
+  "unknown_cost": 4.0,
+  "unknown_fringe": 1.0,
+  "approach": [
+   0.5,
+   1.3
+  ],
+  "replan_every": 2.0
+ },
+ "memory": {
+  "directory": "outputs/memory",
+  "autosave_seconds": 30.0,
+  "_autosave_seconds": [
+   "How often the map is written to disk while running. It used to be saved",
+   "only when the sim disconnected, so anything that killed the process lost",
+   "the session. 0 turns it off."
+  ]
+ },
+ "drone": {
+  "_comment": [
+   "Replaces the glasses' `wearer`. The numbers are the drone's, and two",
+   "of the three are different in kind, not just in value:",
+   "",
+   "  lens_height  the cameras sit at the CENTRE of the sphere, so this is",
+   "               its radius -- 0.15 m, not a standing adult's 1.741 m.",
+   "               Depth uses it to fix Depth Anything's scale, so getting",
+   "               it wrong scales every distance in the map.",
+   "  radius       half the drone, for inflating the map when planning.",
+   "  lens_forward is gone. For the glasses it was head radius plus visor:",
+   "               how far in front of the body the lenses sit. A sphere's",
+   "               centre IS the lens position, so the offset is zero and",
+   "               the term would only add error.",
+   "",
+   "While the drone flies, the brain adds its altitude to lens_height --",
+   "otherwise every height in the map would shift down by however high",
+   "the drone had climbed. The altitude is its own, from the rangefinder",
+   "(delta/brain/height.py).",
+   "",
+   "  max_climb_speed  the fastest the motors climb or sink, m/s (drone.py",
+   "               CLIMB_SPEED). A rangefinder reading changing faster than",
+   "               that is the ground changing under the drone -- flying",
+   "               over a table edge -- not the drone moving."
+  ],
+  "diameter": 0.3,
+  "radius": 0.15,
+  "lens_height": 0.15,
+  "max_climb_speed": 0.8
+ }
+}

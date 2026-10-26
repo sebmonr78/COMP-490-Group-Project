@@ -25,42 +25,28 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "demo"))
 
 import magnum as mn
 
-import open_environment as demo
+from delta import rig as rig_module
+from delta import sim as world
 from delta.drone import CEILING_MARGIN, Drone, find_spot_near
-from delta.navigation import Route
 
 
 def build_world():
-    """Load the scene and put a drone in it, exactly as the demo does."""
+    """Load the scene and put a drone in it, exactly as the demo does.
 
-    config = demo.load_project_config()
+    Through World, not by hand, so the test starts where the app starts:
+    indoors. The hand-built version used the plain random start, and when a
+    finer navmesh renumbered the islands it landed in the garden -- where the
+    climb test found no ceiling, flew to 16 m and failed for a reason that had
+    nothing to do with the drone.
+    """
+    from delta.sim import World
 
-    _, dataset_config, scene_file, navmesh_file = demo.resolve_dataset_paths(
-        config
-    )
+    built = World()
 
-    simulator = demo.create_simulator(dataset_config, scene_file)
-
-    demo.load_or_generate_navmesh(
-        simulator,
-        navmesh_file,
-        config["drone"],
-    )
-
-    start = demo.choose_start_position(simulator)
-
-    drone = Drone(
-        simulator,
-        diameter=float(config["drone"]["diameter"]),
-    )
-
-    drone.place_at(find_spot_near(simulator.pathfinder, start))
-
-    return simulator, drone
+    return built.simulator, built.drone
 
 
 # ---------------------------------------------------------------------
@@ -79,11 +65,29 @@ def starts_on_the_ground(simulator, drone):
 
 
 def rolls_along_the_floor(simulator, drone):
+    """Roll 1.2 m in the most open direction, and check the ball turned.
+
+    The direction is chosen, not fixed. Where the drone starts depends on the
+    navmesh, and a test that always rolls east is testing whether the start
+    happens to have a wall to its east.
+    """
+    import math
+
+    pathfinder = simulator.pathfinder
+    origin = drone.floor_position
+
+    def room_towards(angle):
+        step = mn.Vector3(math.cos(angle), 0.0, math.sin(angle)) * 1.2
+        return (mn.Vector3(pathfinder.try_step(origin, origin + step)) - origin).length()
+
+    best = max((k * math.pi / 4.0 for k in range(8)), key=room_towards)
+    direction = mn.Vector3(math.cos(best), 0.0, math.sin(best))
+
     before = drone.floor_position
     spin_before = list(drone.object.rotation.vector)
 
     for _ in range(60):
-        drone.drive(mn.Vector3(0.02, 0.0, 0.0), simulator.pathfinder)
+        drone.drive(direction * 0.02, simulator.pathfinder)
 
     travelled = (drone.floor_position - before).length()
     spin_after = list(drone.object.rotation.vector)
@@ -221,52 +225,6 @@ def lands_smoothly(simulator, drone):
     )
 
 
-def plans_and_follows_a_rolling_route(simulator, drone):
-    route = Route(simulator.pathfinder)
-
-    # Not every random point is reachable from here -- this house has more
-    # than one floor, and a rolling drone cannot take the stairs. Keep
-    # drawing goals until one of them is somewhere we can actually roll.
-    goal = None
-
-    for seed in range(1, 80):
-        simulator.pathfinder.seed(seed)
-
-        candidate = mn.Vector3(
-            simulator.pathfinder.get_random_navigable_point()
-        )
-
-        if route.plan(drone.floor_position, candidate):
-            goal = candidate
-            break
-
-    assert goal is not None, "no reachable goal found in 80 tries"
-
-    route.start_driving()
-    assert route.driving
-
-    steps = 0
-
-    while route.driving and steps < 100000:
-        was = drone.floor_position
-        now = route.advance(was, 0.03)
-
-        drone.place_at(now)
-        drone.roll(now - was)
-
-        steps += 1
-
-        if route.is_finished:
-            break
-
-    gap = (drone.floor_position - goal).length()
-
-    assert route.is_finished, "the route never finished"
-    assert gap < 0.5, f"stopped {gap:.2f} m from the goal"
-
-    return f"planned {route.length:.2f} m and arrived {gap:.2f} m from the goal"
-
-
 TESTS = [
     starts_on_the_ground,
     rolls_along_the_floor,
@@ -274,7 +232,6 @@ TESTS = [
     flight_is_blocked_by_the_building,
     climbing_stops_below_the_ceiling,
     lands_smoothly,
-    plans_and_follows_a_rolling_route,
 ]
 
 

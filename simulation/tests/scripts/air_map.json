@@ -1,0 +1,13 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+  {"wait": 3},
+  {"fly": 1.2},
+  {"wait": 2},
+  {"turn": 360},
+  {"roam": 3},
+  {"score": "air_map"},
+  {"fly": 0.3},
+  {"land": true},
+  {"wait": 2},
+  {"quit": true}
+]

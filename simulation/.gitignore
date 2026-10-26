@@ -225,3 +225,7 @@ weights/
 outputs/
 *.mp4
 
+
+# Maps the drone built. Regenerate with tools/run_mapping.py --save; they
+# are outputs, not source, and a long run is tens of megabytes.
+data/

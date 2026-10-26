@@ -1,0 +1,17 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+  {"wait": 3},
+  {"turn": 360},
+  {"roam": 4},
+  {"score": "diagnose_after_roam"},
+  {"fly": 0.8},
+  {"turn": 180},
+  {"walk": 3},
+  {"fly": 0.3},
+  {"land": true},
+  {"roam": 2},
+  {"turn": -270},
+  {"score": "diagnose_end"},
+  {"wait": 2},
+  {"quit": true}
+]

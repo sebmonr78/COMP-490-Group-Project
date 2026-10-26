@@ -1,0 +1,15 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+  {"wait": 3},
+  {"label": "look around"},
+  {"turn": 360},
+  {"label": "roam"},
+  {"roam": 4},
+  {"label": "look around again"},
+  {"turn": 360},
+  {"wait": 4},
+  {"score": "replica_map"},
+  {"score_replica": "replica"},
+  {"screenshot": "replica"},
+  {"quit": true}
+]

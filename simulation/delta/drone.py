@@ -64,6 +64,19 @@ MIN_TAKEOFF_CLEARANCE = 0.10
 # How fast the drone climbs and descends, in metres per second.
 CLIMB_SPEED = 0.8
 
+# How far the gimbal can tilt the cameras up or down, in degrees.
+PITCH_LIMIT = 60.0
+
+# A 30 cm drone, not a walking adult. Slower, because the tracker matches
+# features BETWEEN frames: at 1 m/s and 10 frames a second it moves 10 cm,
+# which is about as far as ORB can bridge in this house.
+WALK_SPEED = 0.8                    # m/s
+TURN_SPEED = math.radians(50.0)     # rad/s
+FAST = 2.0                          # Shift multiplies both
+
+# Holding I or K tilts the cameras this fast.
+TILT_SPEED = 45.0          # degrees a second
+
 # Near its target altitude the drone eases off instead of arriving at full
 # speed and stopping dead. The rate is per second: at EASE_RATE = 3.0 it
 # aims to close the remaining gap in about a third of a second, so the last
@@ -109,6 +122,24 @@ class Drone:
         self.flying = False
         self.altitude = 0.0
         self.target_altitude = 0.0
+
+        # Where the SENSOR HEAD looks, in degrees, and the one piece of
+        # orientation the drone actually has.
+        #
+        # The sphere's own rotation is a tumble -- see roll() -- and cameras
+        # bolted to a tumbling shell would spend half their time upside down,
+        # which is not a stereo pair. Real rolling robots put the sensors on
+        # a gimbal that holds them level, so the cameras get their own
+        # heading, kept flat, and the shell is free to roll underneath it.
+        #
+        # Nothing in this class reads it. It exists for whatever is mounted
+        # on the drone, and the drone turns it to face the way it is going.
+        self.heading = 0.0
+
+        # The gimbal's second axis: how far the cameras are tilted, degrees,
+        # POSITIVE LOOKS DOWN (the rig's and the IMU's convention). Level by
+        # default; tilt() moves it within PITCH_LIMIT either way.
+        self.pitch = 0.0
 
         # The height of the surface the drone is currently over. Updated as
         # it rolls, and re-checked as it flies, so it always knows what it
@@ -495,8 +526,16 @@ class Drone:
     # Moving horizontally
     # -----------------------------------------------------------------
 
-    def drive(self, step, pathfinder):
+    def drive(self, step, pathfinder, turn_rate=None):
         """Move `step` metres horizontally, by whichever rule applies now.
+
+        `turn_rate` is how many degrees the gimbal may slew this call, and
+        leaving it out lets the sensor head snap to the new heading in one
+        frame. Anything that tracks features between frames must pass it:
+        measured, an unlimited gimbal turning 73 degrees in a single frame
+        took the drone's believed position 52 m away from the truth, because
+        no feature matcher can connect two views with almost no overlap.
+        A real gimbal cannot do it either.
 
         On the ground the navmesh decides. try_step stops at walls, slides
         along them when you meet one at an angle, and follows the ground up
@@ -511,6 +550,8 @@ class Drone:
         """
         if step.length() < 1e-9:
             return
+
+        self.face(step, turn_rate)
 
         if not self.flying:
             before = self.floor_position
@@ -533,6 +574,64 @@ class Drone:
                 self._follow_ground_below(pathfinder)
 
                 return
+
+    def face(self, direction, turn_rate=None):
+        """Point the sensor head along `direction`.
+
+        Called by drive(), so the cameras look where the drone is going --
+        which is the only sensible default for a robot that is mapping what
+        is ahead of it rather than what it has already passed.
+
+        The maths is the same one the glasses used for the wearer's body: a
+        yaw of t about +y sends Habitat's forward (0, 0, -1) to
+        (-sin t, 0, -cos t), so the yaw that points along (x, z) is
+        atan2(-x, -z).
+
+        `turn_rate` in degrees per second, with the time step folded in by
+        the caller, limits how fast the gimbal slews. Left out, the head
+        snaps -- fine for a map built from stills, wrong for anything that
+        has to track features between frames.
+        """
+        flat = mn.Vector3(direction.x, 0.0, direction.z)
+
+        if flat.length() < 1e-9:
+            return self.heading
+
+        wanted = math.degrees(math.atan2(-flat.x, -flat.z))
+
+        if turn_rate is None:
+            self.heading = wanted
+
+            return self.heading
+
+        # Turn the short way round, which is not what plain subtraction does
+        # when the answer crosses 180 degrees.
+        difference = (wanted - self.heading + 180.0) % 360.0 - 180.0
+
+        if abs(difference) <= turn_rate:
+            self.heading = wanted
+        else:
+            self.heading += turn_rate * (1.0 if difference > 0 else -1.0)
+
+        return self.heading
+
+    @property
+    def sensor_rotation(self):
+        """The gimbal's rotation: heading, then tilt -- never the shell's
+        tumble. Yaw outside pitch, the order Habitat composes sensors in."""
+        return mn.Quaternion.rotation(
+            mn.Deg(self.heading),
+            mn.Vector3.y_axis(),
+        ) * mn.Quaternion.rotation(
+            mn.Deg(-self.pitch),
+            mn.Vector3.x_axis(),
+        )
+
+    def tilt(self, degrees):
+        """Tilt the cameras by `degrees` (positive: further down), within
+        the gimbal's range. Returns the new pitch."""
+        self.pitch = max(-PITCH_LIMIT, min(PITCH_LIMIT, self.pitch + float(degrees)))
+        return self.pitch
 
     def _slide_candidates(self, centre, step):
         """The moves to try, best first: all of it, then one axis at a time."""

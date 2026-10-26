@@ -1,0 +1,28 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+
+  {"label": "still"},
+  {"wait": 3},
+
+  {"label": "drive into wall"},
+  {"walk": 4},
+
+  {"label": "pressed on wall"},
+  {"wait": 3},
+
+  {"label": "turn at wall"},
+  {"turn": 90},
+
+  {"label": "roll along wall"},
+  {"walk": 2},
+
+  {"label": "turn away"},
+  {"turn": 90},
+
+  {"label": "drive away"},
+  {"walk": 2},
+
+  {"label": "end"},
+  {"wait": 2},
+  {"quit": true}
+]

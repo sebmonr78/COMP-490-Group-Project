@@ -1,0 +1,507 @@
+"""Build occupancy grid -- NumPy on the slide.
+
+A top-down grid of the home, 5 cm cells, built only from what the glasses
+have seen. Each cell holds the log-odds that it is blocked. Evidence adds up
+over many frames, so one noisy frame cannot invent a wall, and walking
+through a doorway clears it.
+
+What one frame says, as a Scan:
+
+    hits    floor-plan points of everything 12 cm to 1.9 m above the floor:
+            anything a 1.70 m person could walk into.
+    free    the floor that was actually SEEN, out to the first thing in the
+            way, in each direction.
+
+"Seen" is the careful part. A camera 1.74 m up with a 94 degree vertical
+field cannot see the floor within about 1.6 m of the wearer's feet. A ray to
+the far wall passes over a footstool in that band without touching it, so
+free space must start where the floor was visible, never at the lens, or
+every step forward would erase the stool from the map. The wearer's own
+footprint is the one place known free without being seen.
+
+Scans are kept, not just added in. RTAB-Map corrects its past when a loop
+closes, and `rebuild` redraws the grid from every kept scan at its corrected
+pose, instead of leaving two copies of each wall.
+"""
+
+import copy
+import math
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+from delta import frames
+
+UNKNOWN, FREE, OCCUPIED = 0, 1, 2
+
+# How far obstacles are mapped from a frame whose scale was borrowed.
+BORROWED_RANGE = 1.0
+
+
+@dataclass
+class Scan:
+    """One view, in the base frame of the left lens (x forward, y left)."""
+
+    anchor: int
+    anchor_from_base: np.ndarray    # 4x4
+    free: np.ndarray                # P x 2 polygon, metres
+    hits: np.ndarray                # H x 2 points, metres
+    footprint: np.ndarray           # (x, y, radius) of the robot's body
+
+    # Floor-plan points of everything WALL-HIGH (settings.walls.band, about
+    # 0.9 to 1.8 m up): walls, doors' frames, tall cupboards -- not tables,
+    # sofas or chairs, which stop below it. What rooms.py splits rooms by.
+    walls: np.ndarray = None
+
+    # The same two things for everything from just off the floor to just
+    # under the ceiling (settings.solid.band): points of whatever is there,
+    # and the floor seen with nothing standing on it at any height.
+    solid: np.ndarray = None
+    solid_free: np.ndarray = None
+
+    def world_from_base(self, node_poses):
+        """Where the view was taken from, as the map currently has it."""
+        if self.anchor not in node_poses:
+            return None
+
+        return node_poses[self.anchor] @ self.anchor_from_base
+
+
+def make_scan(depth, K, lens_height, settings, footprint, anchor=0,
+              anchor_from_base=None, step=2, free_space=True, tilt=None,
+              footprint_free=True):
+    """Turn one metric depth map into a Scan.
+
+    `depth` is planar depth in metres (already scale-corrected) and K its
+    intrinsics. `tilt` is the head's tilt from the IMU
+    (frames.level_from_tilted); None means level, when optical y down is
+    straight down and heights need no rotation. `free_space=False`
+    keeps only the obstacles: for a frame whose scale was borrowed rather
+    than measured, nothing should be declared clear.
+
+    `footprint_free=False` also drops the one cell the robot is standing in.
+    For the glasses it was always true -- wherever the wearer is standing is,
+    evidently, floor a person fits on, and that is the only free space you get
+    for nothing. A FLYING drone is the exception: it is not standing on
+    anything, and there may be nothing under it at all. Marking the cell below
+    it free would quietly carve a floor across open stairwells.
+    """
+    height, width = depth.shape
+
+    v, u = np.mgrid[0:height:step, 0:width:step].astype(np.float32)
+    d = depth[::step, ::step]
+
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+
+    forward = d
+    left = -(u + 0.5 - cx) / fx * d
+    up = -(v + 0.5 - cy) / fy * d
+
+    if tilt is not None:
+        # Looking down or tilted: put every point back into the level frame.
+        forward, left, up = (tilt[i, 0] * forward + tilt[i, 1] * left + tilt[i, 2] * up for i in range(3))
+
+    above_floor = lens_height + up
+
+    horizontal = np.hypot(forward, left)
+    seen = (d > 0.1) & (horizontal < float(settings.max_range))
+
+    floor_band = float(settings.floor_band)
+    low, high = settings.obstacle_band
+
+    floor = seen & (np.abs(above_floor) < floor_band)
+    obstacle = seen & (above_floor > low) & (above_floor < high)
+
+    # Per direction: free from the nearest floor seen to whichever comes
+    # first, the first obstacle or the furthest floor seen. Half-degree
+    # directions: at 1.3 degrees (90 across the view) each was 9 cm wide at
+    # 4 m, and floor seen through a doorway fanned out across the wall
+    # beside it in the same direction.
+    half_fov = math.atan((width / 2.0) / fx)
+    bins = 240
+    edges = np.linspace(-half_fov, half_fov, bins + 1)
+    angle = np.arctan2(left, forward)
+
+    def per_bin(mask, reduce, initial):
+        out = np.full(bins, initial, dtype=np.float32)
+        index = np.clip(np.searchsorted(edges, angle[mask]) - 1, 0, bins - 1)
+        reduce.at(out, index, horizontal[mask])
+        return out
+
+    nearest_floor = per_bin(floor, np.minimum, np.inf)
+    furthest_floor = per_bin(floor, np.maximum, 0.0)
+
+    resolution = float(settings.resolution)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+
+    def free_polygon(blocking):
+        """The floor seen free in each direction: from the nearest floor
+        seen to whichever comes first, the first `blocking` point or the
+        furthest floor seen -- as an annulus-shaped polygon, out along the
+        near edge and back along the far. Directions with nothing seen
+        collapse to zero width."""
+        if not free_space:
+            return np.zeros((0, 2), np.float32)
+
+        outer = np.minimum(furthest_floor, per_bin(blocking, np.minimum, np.inf) - resolution)
+        inner = nearest_floor
+        has_free = np.isfinite(inner) & (outer > inner)
+        inner = np.where(has_free, inner, 0.0)
+        outer = np.where(has_free, outer, 0.0)
+
+        near_edge = np.stack([inner * np.cos(centres), inner * np.sin(centres)], axis=1)
+        far_edge = np.stack([outer * np.cos(centres), outer * np.sin(centres)], axis=1)
+        return np.concatenate([near_edge, far_edge[::-1]]).astype(np.float32)
+
+    def points(mask):
+        """Floor-plan points of a mask, one per cell. A borrowed scale is
+        trusted only up close: 15% of 30 cm is nothing, 15% of 3 m puts a
+        sofa where the wearer is standing."""
+        if not free_space:
+            mask = mask & (horizontal < BORROWED_RANGE)
+
+        cells = np.stack([forward[mask], left[mask]], axis=1)
+        cells = np.unique(np.round(cells / resolution).astype(np.int32), axis=0)
+        return (cells * resolution).astype(np.float32)
+
+    # Rolling height: what stops the ball.
+    polygon = free_polygon(obstacle)
+    hits = points(obstacle)
+
+    # Anything up to just under the ceiling: what is THERE -- the map as you
+    # would draw it, tables, sofas and walls solid. Its free floor stops at
+    # the first thing at any height, so the floor under a table, seen past
+    # its legs, is not called free.
+    solid_low, solid_high = _band(settings, "solid", (0.08, 1.8))
+    solid_mask = seen & (above_floor > solid_low) & (above_floor < solid_high)
+
+    # Wall-high points, for the floor plan (rooms.py).
+    wall_low, wall_high = _band(settings, "walls", (0.9, 1.8))
+    wall = seen & (above_floor > wall_low) & (above_floor < wall_high)
+    walls = points(wall)
+
+    body = np.asarray(footprint, dtype=np.float32).copy()
+
+    if not footprint_free:
+        body[2] = 0.0
+
+    return Scan(
+        anchor=anchor,
+        anchor_from_base=np.eye(4) if anchor_from_base is None else anchor_from_base,
+        free=polygon,
+        hits=hits,
+        footprint=body,
+        walls=walls,
+        solid=points(solid_mask),
+        solid_free=free_polygon(solid_mask),
+    )
+
+
+def _band(settings, name, default):
+    """(low, high) metres above the floor, from settings.<name>.band."""
+    section = settings.get(name, {}) if hasattr(settings, "get") else {}
+    low, high = section.get("band", default)
+    return float(low), float(high)
+
+
+class OccupancyGrid:
+    """A square grid of log-odds, centred where the brain started."""
+
+    def __init__(self, settings, centre_xy):
+        self.settings = settings
+        self.resolution = float(settings.resolution)
+        cells = int(round(float(settings.size) / self.resolution))
+
+        self.logodds = np.zeros((cells, cells), np.float32)
+        self.origin = np.array(centre_xy, dtype=np.float64) - cells * self.resolution / 2.0
+
+        self.hit = float(settings.hit)
+        self.miss = float(settings.miss)
+        self.limits = tuple(settings.limits)
+        self.occupied_above = float(settings.occupied_above)
+        self.free_below = float(settings.free_below)
+
+        # A second layer, in the same cells and with the same evidence rules:
+        # is ANYTHING here, from just off the floor to just under the
+        # ceiling? The map as you would draw it -- tables, sofas and walls
+        # solid -- where the layer above is the map of where the ball rolls.
+        self.solid = np.zeros((cells, cells), np.float32)
+
+        # A third: is there something WALL-HIGH here? The floor plan, for
+        # telling rooms apart (rooms.py). Seen floor votes against a wall
+        # (a wall reaches the floor), a wall-high point votes for one.
+        walls = settings.get("walls", {}) if hasattr(settings, "get") else {}
+        self.walls = np.zeros((cells, cells), np.float32)
+        self.wall_hit = float(walls.get("hit", 0.4))
+        self.wall_miss = float(walls.get("miss", -0.2))
+        self.wall_limits = tuple(walls.get("limits", (-2.0, 3.0)))
+        self.wall_above = float(walls.get("wall_above", 0.8))
+
+        self.scans = []
+        self.version = 0
+
+        spacing = settings.keyframe_spacing
+        self._spacing = (float(spacing[0]), math.radians(float(spacing[1])))
+        self._last_kept = None
+
+    # -----------------------------------------------------------------
+    # World and cells
+    # -----------------------------------------------------------------
+
+    def to_cells(self, xy):
+        """World x, y (metres) to fractional (column, row)."""
+        return (np.asarray(xy, dtype=np.float64) - self.origin) / self.resolution
+
+    def to_world(self, cols_rows):
+        return np.asarray(cols_rows, dtype=np.float64) * self.resolution + self.origin
+
+    # -----------------------------------------------------------------
+    # Adding evidence
+    # -----------------------------------------------------------------
+
+    def add(self, scan, world_from_base):
+        """Add one scan's evidence at a pose, and keep it if it is a new view."""
+        self._integrate(scan, world_from_base)
+
+        x, y, yaw = frames.planar(world_from_base)
+
+        if (
+            self._last_kept is None
+            or math.hypot(x - self._last_kept[0], y - self._last_kept[1]) >= self._spacing[0]
+            or abs(frames.wrap(yaw - self._last_kept[2])) >= self._spacing[1]
+        ):
+            self.scans.append(scan)
+            self._last_kept = (x, y, yaw)
+
+        self.version += 1
+
+    def rebuild(self, node_poses):
+        """Redraw everything from the kept scans, at their current poses."""
+        self.logodds[:] = 0.0
+        self.solid[:] = 0.0
+        self.walls[:] = 0.0
+
+        for scan in self.scans:
+            pose = scan.world_from_base(node_poses)
+
+            if pose is not None:
+                self._integrate(scan, pose)
+
+        self.version += 1
+
+    def _integrate(self, scan, world_from_base):
+        x, y, yaw = frames.planar(world_from_base)
+        cos, sin = math.cos(yaw), math.sin(yaw)
+
+        def to_world(points):
+            points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+
+            return np.stack(
+                [x + cos * points[:, 0] - sin * points[:, 1],
+                 y + sin * points[:, 0] + cos * points[:, 1]],
+                axis=1,
+            )
+
+        # Free: the seen floor, plus the footprint the wearer stands on.
+        # Drawn in a window around the scan only -- the whole grid is a
+        # million cells, and a rebuild draws every kept scan again.
+        polygon = np.round(self.to_cells(to_world(scan.free))).astype(np.int32)
+        body = np.round(self.to_cells(to_world(scan.footprint[:2]))[0]).astype(np.int32)
+        radius = int(round(scan.footprint[2] / self.resolution))
+
+        corners = np.vstack([polygon, body - radius, body + radius])
+        rows, cols = self.logodds.shape
+        c0, r0 = np.clip(corners.min(axis=0) - 1, 0, [cols, rows])
+        c1, r1 = np.clip(corners.max(axis=0) + 2, 0, [cols, rows])
+
+        if c1 > c0 and r1 > r0:
+            free = np.zeros((r1 - r0, c1 - c0), np.uint8)
+            offset = np.array([c0, r0])
+
+            if len(polygon) >= 3:
+                cv2.fillPoly(free, [polygon - offset], 1)
+
+            if radius > 0:
+                cv2.circle(free, tuple(int(v) for v in body - offset), radius, 1, -1)
+
+            seen = free.astype(bool)
+
+            window = self.logodds[r0:r1, c0:c1]
+            window[seen] += self.miss
+            np.clip(window, *self.limits, out=window)
+
+            # Floor seen here: no wall stands on it.
+            walls = self.walls[r0:r1, c0:c1]
+            walls[seen] += self.wall_miss
+            np.clip(walls, *self.wall_limits, out=walls)
+
+        # The solid layer's own free floor: nothing at any height on it.
+        if scan.solid_free is not None and len(scan.solid_free) >= 3:
+            self._add_free(self.solid, np.round(self.to_cells(to_world(scan.solid_free))).astype(np.int32))
+
+        # Hits after free, so a wall on the edge of the free area stays a wall.
+        self._add_hits(self.logodds, scan.hits, to_world, self.hit, self.limits[1])
+
+        if scan.solid is not None:
+            self._add_hits(self.solid, scan.solid, to_world, self.hit, self.limits[1])
+
+        if scan.walls is not None:
+            self._add_hits(self.walls, scan.walls, to_world, self.wall_hit, self.wall_limits[1])
+
+    def _add_free(self, layer, polygon):
+        """One miss for every cell inside a polygon of cells, drawn in a
+        window around it only."""
+        rows, cols = layer.shape
+        c0, r0 = np.clip(polygon.min(axis=0) - 1, 0, [cols, rows])
+        c1, r1 = np.clip(polygon.max(axis=0) + 2, 0, [cols, rows])
+
+        if c1 <= c0 or r1 <= r0:
+            return
+
+        free = np.zeros((r1 - r0, c1 - c0), np.uint8)
+        cv2.fillPoly(free, [polygon - np.array([c0, r0])], 1)
+
+        window = layer[r0:r1, c0:c1]
+        window[free.astype(bool)] += self.miss
+        np.clip(window, *self.limits, out=window)
+
+    def _add_hits(self, layer, points, to_world, hit, ceiling):
+        """One vote per cell for each floor-plan point, however many land in it."""
+        if not len(points):
+            return
+
+        cells = np.round(self.to_cells(to_world(points))).astype(np.int64)
+        rows, cols = cells[:, 1], cells[:, 0]
+        inside = (rows >= 0) & (rows < layer.shape[0]) & (cols >= 0) & (cols < layer.shape[1])
+        flat = np.unique(rows[inside] * layer.shape[1] + cols[inside])
+        layer.flat[flat] = np.minimum(layer.flat[flat] + hit, ceiling)
+
+    # -----------------------------------------------------------------
+    # Reading it
+    # -----------------------------------------------------------------
+
+    def classes(self, layer=None):
+        """UNKNOWN, FREE or OCCUPIED for every cell -- of the rolling map,
+        or of `layer` (self.solid) by the same thresholds."""
+        layer = self.logodds if layer is None else layer
+        out = np.full(layer.shape, UNKNOWN, np.uint8)
+        out[layer < self.free_below] = FREE
+        out[layer > self.occupied_above] = OCCUPIED
+        return out
+
+    def solid_classes(self):
+        """UNKNOWN, FREE or OCCUPIED of anything up to just under the ceiling."""
+        return self.classes(self.solid)
+
+    def wall_cells(self):
+        """True where the map has seen something wall-high."""
+        return self.walls > self.wall_above
+
+    def known_bounds(self, margin=1.0):
+        """(row0, row1, col0, col1) around every cell with any evidence."""
+        rows, cols = np.nonzero((self.logodds != 0.0) | (self.solid != 0.0))
+
+        if len(rows) == 0:
+            return None
+
+        pad = int(round(margin / self.resolution))
+        shape = self.logodds.shape
+
+        return (
+            max(0, rows.min() - pad), min(shape[0], rows.max() + pad + 1),
+            max(0, cols.min() - pad), min(shape[1], cols.max() + pad + 1),
+        )
+
+    def is_occupied(self, xy):
+        col, row = np.round(self.to_cells(xy)).astype(int)
+
+        if not (0 <= row < self.logodds.shape[0] and 0 <= col < self.logodds.shape[1]):
+            return False
+
+        return bool(self.logodds[row, col] > self.occupied_above)
+
+    # -----------------------------------------------------------------
+    # Saving
+    # -----------------------------------------------------------------
+
+    def snapshot(self):
+        """A copy to save from while this one goes on being drawn in: the
+        layers copied (milliseconds), the scans shared (never changed)."""
+        twin = copy.copy(self)
+        twin.logodds, twin.solid, twin.walls = self.logodds.copy(), self.solid.copy(), self.walls.copy()
+        twin.scans = list(self.scans)
+        return twin
+
+    def save(self, path):
+        """Scans and grid to one .npz: polygons and hits flattened, with
+        offsets, so no pickle is needed to read it back."""
+        def flatten(arrays):
+            lengths = np.array([len(a) for a in arrays], dtype=np.int64)
+            data = np.concatenate(arrays) if arrays else np.zeros((0, 2), np.float32)
+            return data, lengths
+
+        free, free_lengths = flatten([s.free for s in self.scans])
+        hits, hit_lengths = flatten([s.hits for s in self.scans])
+        def or_empty(points):
+            return points if points is not None else np.zeros((0, 2), np.float32)
+
+        walls, wall_lengths = flatten([or_empty(s.walls) for s in self.scans])
+        solid, solid_lengths = flatten([or_empty(s.solid) for s in self.scans])
+        solid_free, solid_free_lengths = flatten([or_empty(s.solid_free) for s in self.scans])
+
+        np.savez_compressed(
+            path,
+            logodds=self.logodds,
+            walls_layer=self.walls,
+            walls=walls, wall_lengths=wall_lengths,
+            solid_layer=self.solid,
+            solid=solid, solid_lengths=solid_lengths,
+            solid_free=solid_free, solid_free_lengths=solid_free_lengths,
+            origin=self.origin,
+            resolution=self.resolution,
+            anchors=np.array([s.anchor for s in self.scans], dtype=np.int64),
+            anchor_from_base=np.array([s.anchor_from_base for s in self.scans]).reshape(-1, 4, 4),
+            footprints=np.array([s.footprint for s in self.scans]).reshape(-1, 3),
+            free=free, free_lengths=free_lengths,
+            hits=hits, hit_lengths=hit_lengths,
+        )
+
+    def load(self, path):
+        data = np.load(path)
+
+        if data["logodds"].shape != self.logodds.shape or float(data["resolution"]) != self.resolution:
+            raise ValueError("Saved grid has a different size or resolution than config/brain.json")
+
+        self.logodds[:] = data["logodds"]
+        self.origin = data["origin"]
+
+        free = np.split(data["free"], np.cumsum(data["free_lengths"])[:-1])
+        hits = np.split(data["hits"], np.cumsum(data["hit_lengths"])[:-1])
+
+        # Maps saved before the walls layer existed have no wall points.
+        if "walls" in data:
+            self.walls[:] = data["walls_layer"]
+            walls = np.split(data["walls"], np.cumsum(data["wall_lengths"])[:-1])
+        else:
+            self.walls[:] = 0.0
+            walls = [None] * len(data["anchors"])
+
+        # ...and before the solid layer, no solid points.
+        if "solid" in data:
+            self.solid[:] = data["solid_layer"]
+            solid = np.split(data["solid"], np.cumsum(data["solid_lengths"])[:-1])
+            solid_free = np.split(data["solid_free"], np.cumsum(data["solid_free_lengths"])[:-1])
+        else:
+            self.solid[:] = 0.0
+            solid = solid_free = [None] * len(data["anchors"])
+
+        self.scans = [
+            Scan(int(anchor), pose, f, h, footprint, w, s, sf)
+            for anchor, pose, f, h, footprint, w, s, sf in zip(
+                data["anchors"], data["anchor_from_base"], free, hits,
+                data["footprints"], walls, solid, solid_free,
+            )
+        ]
+
+        self.version += 1
