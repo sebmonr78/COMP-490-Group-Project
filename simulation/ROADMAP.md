@@ -102,26 +102,6 @@ With the true position the replica is 0.95; with RTAB-Map's 0.63. So:
 - **Test:** contacts (must be 0), stop distance, success past obstacles.
 - **Connected to:** 1; needed before 8.
 
-### 8. Explore on its own
-- **What:** map the whole house without being driven, with as little
-  flying and time as possible.
-- **How:** go to the nearest edge of the unexplored (a frontier) by the
-  cheapest route; at each stop, look around: a turn on the ground with the
-  cameras tilted up, then fly up and turn with them tilted down, then land
-  and roll on. Stop when there are no frontiers left.
-- **Test:** % of the house mapped, minutes, metres flown vs rolled.
-- **Connected to:** 1, 7.
-
-### 9. Real depth
-- **What:** Depth Anything instead of the simulator's true depth.
-- **Test:** every test above again; what breaks gets fixed here.
-
-### 10. Localization, better
-- The map check (compare what depth sees with the map; already in the brain,
-  switched off) — measured on its own.
-- RTAB-Map slows as its map grows (perception ~6 → ~3 frames a second over
-  one long run): tune its memory.
-
 ## Later
 - **Water** (pools, ponds): depth and the ultrasonic sensor can take water
   for a floor. Never land on a surface not recognised as solid.
