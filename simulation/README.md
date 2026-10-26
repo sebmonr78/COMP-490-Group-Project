@@ -361,9 +361,12 @@ Two processes start: the brain (env `brain`, its log in
 local socket, which is how the real drone will reach the laptop. The first run
 builds the drone's navmesh and loads Depth Anything, so it is slow to start.
 
-On the left is the house, seen from behind the drone. On the right is the map
+On the left is the house, seen from behind the drone. In the middle is the map
 **the brain built for itself**, drawn over the true layout in grey. Where the
-two disagree is the brain's error.
+two disagree is the brain's error. On the right is the brain's 3D replica,
+with the ceiling taken off to see into the rooms -- only in the picture: the
+brain keeps the ceiling and knows how high it is (the height box shows it next
+to the truth).
 
 | Key | Action |
 |---|---|
@@ -374,6 +377,10 @@ two disagree is the brain's error.
 | `Shift` | faster |
 | `V` | free camera: `WASD`, `IJKL`, `Z` `X` |
 | `M` | show or hide the true layout |
+| `N` | show or hide the rooms |
+| `I` `K` `O` | tilt the cameras up, down, level |
+| drag, scroll the 3D replica | turn it, zoom it; `F` follows the drone or stays put |
+| `[` `]` | the replica without its ceiling (the start), a flat cut lower down, or everything |
 | click the map | plan a route **on the brain's own map** |
 | `G` | follow it |
 | `C` | clear it |

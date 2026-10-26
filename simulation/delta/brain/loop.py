@@ -173,6 +173,7 @@ class Brain:
         self._replica_jobs = queue.Queue()
         self._replica_sent = -1
         self._replica_at = 0.0
+        self.ceiling = None            # replica.Ceiling, once one is seen
 
         self.rates = {name: Rate() for name in ("frames", "perception")}
         self.timing = {}
@@ -462,6 +463,7 @@ class Brain:
                 self.grid = None
 
             self.replica.reset()
+            self.ceiling = None
             self.status("I don't recognise this place; starting a new map.")
             return True
 
@@ -739,11 +741,25 @@ class Brain:
         if not len(centres):
             return
 
+        # Where the ceiling is, patch by patch, from the same cubes: how high
+        # the drone can fly anywhere, and what the window takes off.
+        self.ceiling = replica_module.find_ceiling(centres, voxel, self.settings.replica.ceiling)
+
         self.link.send(
             "replica",
-            {"voxel": voxel, "epoch": self.epoch, "views": len(self.replica.views)},
-            {"index": np.floor(centres / voxel).astype(np.int16), "colour": colours},
+            {"voxel": voxel, "epoch": self.epoch, "views": len(self.replica.views),
+             "ceiling_origin": [float(v) for v in self.ceiling.origin],
+             "ceiling_cell": self.ceiling.cell},
+            {"index": np.floor(centres / voxel).astype(np.int16), "colour": colours,
+             "ceiling": self.ceiling.heights.astype(np.float16)},
         )
+
+    def _ceiling_here(self, pose):
+        if self.ceiling is None or pose is None:
+            return None
+
+        height = self.ceiling.at((pose["x"], pose["y"]))
+        return None if height is None else round(height, 3)
 
     def _split_rooms(self, classes, walls, corner, resolution):
         """Cut the map into rooms (rooms.py) and keep the answer to publish.
@@ -874,6 +890,9 @@ class Brain:
             # What the rangefinder says is under the drone: 0 is the floor.
             "surface_below": round(self.height.surface, 3),
             "range_down": None if self.height.reading is None else round(self.height.reading, 3),
+            # How high the ceiling is over the drone, from the replica: None
+            # until one has been seen here.
+            "ceiling": self._ceiling_here(fields.get("pose")),
             "map_localize": (
                 dict(self.corrector.stats) if self.corrector is not None else None
             ),

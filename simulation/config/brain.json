@@ -178,7 +178,17 @@
   "max_range": 4.0,
   "max_height": 3.0,
   "step": 2,
-  "every_seconds": 3.0
+  "every_seconds": 3.0,
+  "ceiling": {
+   "_comment": [
+    "The ceiling, from the cubes (replica.find_ceiling): in each cell x cell",
+    "patch, the highest 5 cm layer above `lowest` metres holding at least",
+    "min_cubes cubes (a whole layer of a 0.5 m patch is 100)."
+   ],
+   "cell": 0.5,
+   "lowest": 1.4,
+   "min_cubes": 30
+  }
  },
  "rooms": {
   "_comment": [
