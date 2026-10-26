@@ -229,6 +229,15 @@ class Replica:
         centres = (_unpack(keys).astype(np.float32) + 0.5) * self.voxel
         return centres, np.clip(colour, 0, 255).astype(np.uint8)
 
+    def memory(self):
+        """(cubes MB, views MB): the cube arrays and their index -- about
+        100 bytes a cube in a Python dict -- and the kept views."""
+        with self.lock:
+            cubes = (self._keys.nbytes + self._seen.nbytes + self._colour.nbytes + 100 * len(self._slot)) / 1e6
+            views = sum(v.points.nbytes + v.colours.nbytes for v in self.views) / 1e6
+
+        return cubes, views
+
     def __len__(self):
         with self.lock:
             return int((self._seen[:self._used] >= self.min_seen).sum())

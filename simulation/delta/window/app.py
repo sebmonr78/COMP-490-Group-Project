@@ -79,6 +79,7 @@ from delta.window.colours import (  # noqa: E402
 )
 from delta.window.examiner import Alignment, Examiner  # noqa: E402
 from delta.window.link import BrainLink  # noqa: E402
+from delta.window.monitor import Monitor  # noqa: E402
 from delta.window.script import Script  # noqa: E402
 from delta.window.view3d import OrbitView, Painter  # noqa: E402
 
@@ -106,6 +107,7 @@ def layout(size, ui=1.0):
     """
     global UI, WINDOW, PANEL, TOP, MAP_X, REPLICA_X, STRIP_TOP, STATUS_TOP
     global FEED, LOG_LEFT, HEIGHT_BOX_TOP, HEIGHT_BOX_HEIGHT
+    global RESOURCES_LEFT, RESOURCES_TOP, RESOURCES_WIDTH, RESOURCES_HEIGHT, LOG_CLEAR
 
     UI, WINDOW = float(ui), (int(size[0]), int(size[1]))
     width, height = WINDOW
@@ -124,6 +126,18 @@ def layout(size, ui=1.0):
     LOG_LEFT = px(16) + 2 * FEED[0] + px(10)
     HEIGHT_BOX_TOP = STRIP_TOP + px(24)
     HEIGHT_BOX_HEIGHT = px(131)
+
+    # The resources box: beside the height box where the log is wide enough
+    # (a 4K screen), under it where it is not.
+    RESOURCES_WIDTH, RESOURCES_HEIGHT = px(365), px(10 * 18 + 8)
+
+    if width - LOG_LEFT - px(8) >= px(380 + 10) + RESOURCES_WIDTH:
+        RESOURCES_LEFT, RESOURCES_TOP = LOG_LEFT + px(390), HEIGHT_BOX_TOP
+    else:
+        RESOURCES_LEFT, RESOURCES_TOP = LOG_LEFT, HEIGHT_BOX_TOP + HEIGHT_BOX_HEIGHT + px(6)
+
+    # The log's lines stop above both boxes.
+    LOG_CLEAR = max(HEIGHT_BOX_TOP + HEIGHT_BOX_HEIGHT, RESOURCES_TOP + RESOURCES_HEIGHT) + px(6)
 
 
 layout(WINDOW)
@@ -233,7 +247,7 @@ class DroneApp(Examiner):
 
         print("Opening the house...")
         self.world = World(stage="process", true_depth=(args.depth == "oracle"),
-                           viewer_size=(PANEL, TOP))
+                           viewer_size=(int(PANEL / UI), int(TOP / UI)))
         self.drone_config = self.world.config["drone"]
         self.rig = self.world.rig
         self.imu = Imu(seed=7)
@@ -299,6 +313,7 @@ class DroneApp(Examiner):
         self.orbit = OrbitView()
         self.painter = Painter()           # draws the replica on its own thread
         self.watch = Stopwatch()
+        self.monitor = Monitor()       # memory, CPU, GPU, every 2 s
         self.replica_cut = "ceiling"   # a height, "ceiling", or None: all
         self._replica_shown = None     # (key, centres, colours) last drawn
         self._map_cache = None         # (state, what is shown, the layers, when)
@@ -429,7 +444,12 @@ class DroneApp(Examiner):
                 with self.watch.part("script"):
                     self.script.step(dt)
 
-            if self.clock >= self.next_frame:
+            # Habitat draws the cameras on one loop in three: that loop keeps
+            # the view behind the drone it already has instead of drawing it
+            # too -- drawing both made every third frame twice as long.
+            self._drew_cameras = self.clock >= self.next_frame
+
+            if self._drew_cameras:
                 with self.watch.part("cameras"):
                     self._send_frame()
                 self.next_frame = self.clock + 1.0 / self.frame_rate
@@ -804,12 +824,14 @@ class DroneApp(Examiner):
     # -----------------------------------------------------------------
 
     def _send_frame(self):
-        seen = self.world.observe_rig()
+        with self.watch.part("cameras: render"):
+            seen = self.world.observe_rig()
         self.last_glasses = seen
 
         # The examiner notes where the drone really was for this frame. Its
         # notes stay here, in the window; none of it goes to the brain.
-        self._note_truth(seen)
+        with self.watch.part("cameras: truth notes"):
+            self._note_truth(seen)
 
         if self.brain is not None and self.brain.connected:
             fields = {
@@ -878,7 +900,8 @@ class DroneApp(Examiner):
             if self.args.depth == "oracle":
                 arrays["true_depth"] = seen["true_depth"]
 
-            self.brain.send("frame", fields, arrays)
+            with self.watch.part("cameras: send"):
+                self.brain.send("frame", fields, arrays)
 
         self.frame_id += 1
 
@@ -1213,21 +1236,28 @@ class DroneApp(Examiner):
         lines.pop_transform()
 
     def _draw_viewer(self):
-        if not self.free_camera:
-            self._place_chase_camera()
+        """The drone from behind: Habitat renders it at one pixel a point
+        (on 4K, 44% of the panel's pixels), scaled up -- and not at all on
+        a loop that drew the cameras; the last picture stands in."""
+        if getattr(self, "_drew_cameras", False) and getattr(self, "_viewer_surface", None) is not None:
+            self.screen.blit(self._viewer_surface, (0, 0))
         else:
-            self.world.viewer_node.rotation = mn.Quaternion.rotation(
-                mn.Deg(self.camera_yaw), mn.Vector3.y_axis()
-            ) * mn.Quaternion.rotation(mn.Deg(self.camera_pitch), mn.Vector3.x_axis())
+            if not self.free_camera:
+                self._place_chase_camera()
+            else:
+                self.world.viewer_node.rotation = mn.Quaternion.rotation(
+                    mn.Deg(self.camera_yaw), mn.Vector3.y_axis()
+                ) * mn.Quaternion.rotation(mn.Deg(self.camera_pitch), mn.Vector3.x_axis())
 
-        self._outline_drone()
-        image = self.world.observe_viewer()
-        surface = pygame.surfarray.make_surface(np.transpose(image[:, :, :3], (1, 0, 2)))
+            self._outline_drone()
+            image = self.world.observe_viewer()
+            surface = pygame.surfarray.make_surface(np.transpose(image[:, :, :3], (1, 0, 2)))
 
-        if surface.get_size() != (PANEL, TOP):
-            surface = pygame.transform.smoothscale(surface, (PANEL, TOP))
+            if surface.get_size() != (PANEL, TOP):
+                surface = pygame.transform.smoothscale(surface, (PANEL, TOP))
 
-        self.screen.blit(surface, (0, 0))
+            self._viewer_surface = surface
+            self.screen.blit(surface, (0, 0))
 
         label = "Free camera (WASD, IJKL, Z/X) - V to follow" if self.free_camera else "Behind you - V for free camera"
         self._text(label, (px(12), px(10)), self.big, (240, 240, 240))
@@ -1267,7 +1297,8 @@ class DroneApp(Examiner):
                 self._widen_view_for(state, arrays)
 
             canvas = self._map_layers(state, arrays)
-            cached = self._map_cache = (state, shown, pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2))),
+            surface = pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2)))
+            cached = self._map_cache = (state, shown, pygame.transform.smoothscale(surface, (PANEL, TOP)),
                                         time.monotonic())
 
         self.screen.blit(cached[2], (MAP_X, 0))
@@ -1276,7 +1307,10 @@ class DroneApp(Examiner):
     def _map_layers(self, state, arrays):
         """The map panel's picture: the true layout, the brain's map, its
         rooms."""
-        canvas = np.zeros((TOP, PANEL, 3), np.uint8)
+        # At one pixel a point: on 4K the panel has 2.25 times the pixels,
+        # and each redraw took 35-40 ms. Every warp is the panel's, scaled.
+        size = (int(PANEL / UI), int(TOP / UI))
+        canvas = np.zeros((size[1], size[0], 3), np.uint8)
         canvas[:] = (20, 23, 28)
 
         if self.show_truth:
@@ -1284,14 +1318,14 @@ class DroneApp(Examiner):
             view = self.truth_affine.tobytes()
 
             if getattr(self, "_truth_warped", (None,))[0] != view:
-                self._truth_warped = (view, cv2.warpAffine(self.truth_layer, self.truth_affine, (PANEL, TOP),
+                self._truth_warped = (view, cv2.warpAffine(self.truth_layer, self.truth_affine / UI, size,
                                                            flags=cv2.INTER_NEAREST))
 
             canvas = np.maximum(canvas, self._truth_warped[1])
 
         if state and "grid" in state and "grid" in arrays and self.alignment.ready:
             grid = arrays["grid"]
-            affine = self._panel_affine(state["grid"])
+            affine = self._panel_affine(state["grid"]) / UI
 
             # What is there, from the solid layer -- white where anything
             # stands, at any height, like the glasses' map -- and, from the
@@ -1305,16 +1339,16 @@ class DroneApp(Examiner):
             colours[(solid == 2) & (grid == 1)] = ROLL_UNDER_COLOUR
             colours[grid == 2] = OCCUPIED_COLOUR
 
-            mask = cv2.warpAffine(((grid > 0) | (solid > 0)).astype(np.uint8), affine, (PANEL, TOP),
+            mask = cv2.warpAffine(((grid > 0) | (solid > 0)).astype(np.uint8), affine, size,
                                   flags=cv2.INTER_NEAREST)
-            warped = cv2.warpAffine(colours, affine, (PANEL, TOP), flags=cv2.INTER_NEAREST)
+            warped = cv2.warpAffine(colours, affine, size, flags=cv2.INTER_NEAREST)
             canvas[mask > 0] = warped[mask > 0]
 
         # The brain's rooms, each its own tint over the map (N to hide).
         if self.show_rooms and state and "rooms" in state and "rooms" in arrays and self.alignment.ready:
             labels = arrays["rooms"]
-            warped = cv2.warpAffine(labels.astype(np.uint8), self._panel_affine(state["rooms"]),
-                                    (PANEL, TOP), flags=cv2.INTER_NEAREST)
+            warped = cv2.warpAffine(labels.astype(np.uint8), self._panel_affine(state["rooms"]) / UI,
+                                    size, flags=cv2.INTER_NEAREST)
             # Only the free floor is tinted: what is occupied stays white, so
             # the rooms never hide the map underneath them.
             tinted = (warped > 0) & np.all(canvas == FREE_COLOUR, axis=2)
@@ -1453,7 +1487,7 @@ class DroneApp(Examiner):
 
         for kind, line in reversed(lines):
             # Stop under the height box.
-            if y < HEIGHT_BOX_TOP + HEIGHT_BOX_HEIGHT + px(6):
+            if y < LOG_CLEAR:
                 break
 
             self._text(line, (x, y), self.small, KIND_COLOURS.get(kind, (200, 200, 200)))
@@ -1500,6 +1534,7 @@ class DroneApp(Examiner):
         ]
 
         self._draw_height(stats)
+        self._draw_resources(stats)
 
         if sources.get("pose") == "rtabmap":
             parts.append(f"RTAB-Map {loc.get('ms', 0):.0f} ms, nodes {loc.get('nodes', 0)}, "
@@ -1514,6 +1549,61 @@ class DroneApp(Examiner):
             parts.append("RECOGNISING LAST SESSION'S MAP...")
 
         self._text("   |   ".join(parts), (px(8), STATUS_TOP + px(5)), self.small, (175, 180, 190))
+
+    def _draw_resources(self, stats):
+        """What it all costs, next to the height box: memory and CPU of the
+        three processes, the GPU, and the size of each map. Measured every
+        2 s -- the brain's half by the brain itself."""
+        brain = stats.get("resources") or {}
+        processes = brain.get("processes", {})
+        map_2d, replica, rtabmap = brain.get("map_2d", {}), brain.get("replica", {}), brain.get("rtabmap", {})
+        gpu, machine = self.monitor.gpu, self.monitor.machine
+
+        def size(mb):
+            if mb is None:
+                return "-"
+            return f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB"
+
+        def usage(process):
+            return (size(process.get("mb")), f"{process['cpu']:.0f}%" if "cpu" in process else "-")
+
+        rows = [
+            ("RESOURCES", "memory", "CPU"),
+            ("window (sim + drawing)", *usage(self.monitor.window)),
+            ("brain", *usage(processes.get("brain", {}))),
+            ("RTAB-Map", *usage(processes.get("rtabmap", {}))),
+        ]
+        lines = []
+
+        if gpu:
+            watts = f"   {gpu['watts']:.0f} W" if gpu.get("watts") is not None else ""
+            lines.append(f"GPU  {gpu['use']:.0f}% busy   {size(gpu['mb'])} of {size(gpu['total_mb'])}{watts}")
+        else:
+            lines.append("GPU  (nvidia-smi not found)")
+
+        if machine:
+            lines.append(f"machine  CPU {machine['cpu']:.0f}% of {machine['threads']} threads   "
+                         f"RAM {size(machine['mb'])} / {size(machine['total_mb'])}")
+
+        lines.append(f"2D map  {size(map_2d.get('mb'))}   ({map_2d.get('scans', 0)} views kept)")
+        lines.append(f"3D replica  {replica.get('cubes', 0):,} cubes, {size(replica.get('mb'))}   "
+                     f"views {size(replica.get('views_mb'))}")
+        lines.append(f"RTAB-Map  {rtabmap.get('nodes', 0)} places, database {size(rtabmap.get('db_mb'))}")
+        lines.append(f"window {self.timer.get_fps():.0f} fps   brain {stats.get('rates', {}).get('perception', 0):.0f} frames/s")
+
+        x, top = RESOURCES_LEFT, RESOURCES_TOP
+        pygame.draw.rect(self.screen, (24, 26, 32), pygame.Rect(x, top, RESOURCES_WIDTH, RESOURCES_HEIGHT))
+
+        for i, (name, memory, cpu) in enumerate(rows):
+            y = top + px(4) + i * px(18)
+            colour = (150, 155, 165) if i == 0 else (225, 225, 225)
+            self._text(name, (x + px(8), y), self.small, colour)
+            self._text(memory, (x + px(200), y), self.small, colour)
+            self._text(cpu, (x + px(285), y), self.small, colour)
+
+        for i, line in enumerate(lines):
+            y = top + px(4) + (len(rows) + i) * px(18)
+            self._text(line, (x + px(8), y), self.small, (190, 195, 205))
 
     def _draw_height(self, stats):
         """Two heights, the brain's next to the truth, on the 3D view:
