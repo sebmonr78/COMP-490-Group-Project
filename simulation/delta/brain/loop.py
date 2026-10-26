@@ -730,6 +730,7 @@ class Brain:
                     r0, r1, c0, c1 = bounds
 
                     arrays["grid"] = self.grid.classes()[r0:r1, c0:c1]
+                    arrays["solid"] = self.grid.solid_classes()[r0:r1, c0:c1]
 
                     # A copy for splitting into rooms, outside the lock.
                     if time.monotonic() - self._rooms_at >= float(self.settings.rooms.every_seconds):
