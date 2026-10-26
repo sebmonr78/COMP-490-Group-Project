@@ -13,15 +13,35 @@
     "environment_variable": "HABITAT_DATA_PATH",
     "default_root": "~/habitat-data/versioned_data/hssd-hab",
     "configuration_file": "hssd-hab-uncluttered.scene_dataset_config.json",
-    "scene_id": "103997586_171030666",
-    "scene_file": "scenes-uncluttered/103997586_171030666.scene_instance.json",
-    "semantic_file": "semantics/scenes/103997586_171030666.semantic_config.json",
-    "stage_file": "stages/103997586_171030666.glb",
-    "drone_navmesh_file": "generated_navmeshes/103997586_171030666_drone.navmesh"
+    "scene_id": "102816036",
+    "scene_file": "scenes-uncluttered/102816036.scene_instance.json",
+    "semantic_file": "semantics/scenes/102816036.semantic_config.json",
+    "stage_file": "stages/102816036.glb",
+    "drone_navmesh_file": "generated_navmeshes/102816036_drone.navmesh",
+    "_scene": [
+      "A family home on one floor, 29 x 21 m: 536 m2 indoors by HSSD's room",
+      "outlines, 36 rooms (5 bedrooms, 6 bathrooms, 3 toilets, kitchen,",
+      "dining room, 2 family rooms, 2 offices, hallway, garage), 290 m2 the",
+      "drone can roll on in one connected piece. Chosen over the first",
+      "house (103997586_171030666: 157 m2, 6 rooms, no bedrooms) for room",
+      "work; HSSD_SCENE=<id> runs any other."
+    ]
   },
   "drone": {
     "diameter": 0.3,
     "max_climb": 0.08,
-    "max_slope": 45.0
+    "max_slope": 45.0,
+    "navmesh_cell_size": 0.05,
+    "navmesh_cell_height": 0.02,
+    "_navmesh_cell_height": [
+      "Voxel height for building the drone's navmesh, in metres. Habitat's",
+      "default is 0.20, which is fine for a person and wrong for this robot:",
+      "Recast measures climb and clearance in whole voxels, so an 8 cm climb",
+      "rounded down to ZERO voxels and a 30 cm body rounded up to 40 cm. The",
+      "result was that a 2 cm rug became a wall -- measured, only 2 of 15",
+      "points on the nearest rug were on the navmesh, and the drone stopped",
+      "one radius short of its edge. At 0.02 the climb is 4 voxels, the",
+      "rug's edge is 1, and the body is exactly 15."
+    ]
   }
 }
