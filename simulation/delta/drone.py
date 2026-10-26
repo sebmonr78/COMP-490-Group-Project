@@ -67,6 +67,16 @@ CLIMB_SPEED = 0.8
 # How far the gimbal can tilt the cameras up or down, in degrees.
 PITCH_LIMIT = 60.0
 
+# A 30 cm drone, not a walking adult. Slower, because the tracker matches
+# features BETWEEN frames: at 1 m/s and 10 frames a second it moves 10 cm,
+# which is about as far as ORB can bridge in this house.
+WALK_SPEED = 0.8                    # m/s
+TURN_SPEED = math.radians(50.0)     # rad/s
+FAST = 2.0                          # Shift multiplies both
+
+# Holding I or K tilts the cameras this fast.
+TILT_SPEED = 45.0          # degrees a second
+
 # Near its target altitude the drone eases off instead of arriving at full
 # speed and stopping dead. The rate is per second: at EASE_RATE = 3.0 it
 # aims to close the remaining gap in about a third of a second, so the last

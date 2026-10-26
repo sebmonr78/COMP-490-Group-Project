@@ -14,8 +14,9 @@
 #     the sim window  conda env `habitat`  (3.9, habitat-sim)
 #
 # They talk over a local TCP socket -- which is also how the real drone will
-# reach the laptop. Every option goes to demo/run_drone.py; the brain is told
-# what to load by the sim when it connects.
+# reach the laptop. Every option goes to the window (demo/run_drone.py, code
+# in delta/window/); the brain is told what to load by the window when it
+# connects.
 #
 # To watch the brain think, in another terminal:
 #

@@ -481,21 +481,24 @@ against ground truth. A stereo pair does not care whether it is on a head or
 in a ball.
 
 ```
-two camera images, IMU, axle encoder
+two camera images, IMU, axle encoder, rangefinder, climb rate
+   -> loop.py        the brain's main loop: takes each frame through the rest
    -> localize.py    RTAB-Map: where am I; loop closures correct the past
-   -> depth.py       Depth Anything 3, scaled from the floor
-   -> occupancy.py   the map at rolling height, and a wall-high floor plan
+   -> height.py      how high I am, and what is under me (rangefinder)
+   -> depth.py       how far everything is: Depth Anything 3, scaled from the floor
+   -> occupancy.py   the 2D map: rolling height, anything up to 1.8 m, wall height
    -> rooms.py       the floor plan split into rooms at the doors
-   -> planner.py     routes on that map
+   -> replica.py     the 3D replica in colour, and the ceiling's height
+   -> planner.py     routes on the map
 ```
 
 **Nothing in the brain may read Habitat.** The simulator sends what the
-drone's own hardware would measure -- two pictures, the IMU, the encoder --
-and nothing else. A map that is right because it was told the answer is not a
-result. Ground truth is used only to *score* the brain, or, with the oracle
-switches, to stand in for one part while another is checked. The one
-exception still left is altitude: the sim tells the brain how high it is
-flying. Replacing that with a measurement is the next piece of work.
+drone's own hardware would measure -- two pictures, the IMU, the encoder, the
+rangefinder, the climb rate -- and nothing else. A map that is right because
+it was told the answer is not a result. Ground truth is used only to *score*
+the brain, or, with the oracle switches (`--pose oracle`, `--depth oracle`),
+to stand in for one part while another is checked: `run_localization.sh`
+gives the brain the true depth, so that only its localization is tested.
 
 ### Localization
 
@@ -543,23 +546,37 @@ summarizes one run. `HSSD_SCENE=<scene id>` runs everything in another house.
 
 ## 14. What is in this folder
 
+Four parts, as on the real drone: the world (here the simulator; later the
+real house and the real drone), the cable, the brain, and a window to watch
+it with.
+
 ```
-run_drone.sh                the brain and the sim window, together
-run_localization.sh         the same, with only localization real
+THE WORLD -- knows the truth
+delta/sim.py                the house, the navmesh, and the sensors: cameras,
+                            IMU, axle encoder, rangefinder, climb rate
+delta/drone.py              the drone: a sphere that rolls, flies and collides
+delta/rig.py                the cameras, as hardware: where they are, what they see
+
+THE CABLE
+delta/wire.py               the socket: sensor readings to the brain, its state back
+
+THE BRAIN -- never sees the truth (section 13)
+delta/brain/
+
+THE WINDOW -- the simulated drone, and what you see
+demo/run_drone.py           starts it (run_drone.sh starts the brain too)
+delta/window/app.py         drives the drone, sends its sensors, draws the panels
+delta/window/examiner.py    the ONLY window code that reads the truth: the grey
+                            true map, the green ring, the truth column, the scores
+delta/window/link.py        the window's end of the cable
+delta/window/script.py      test drives from tests/scripts/*.json
+delta/window/view3d.py      draws the 3D replica panel
 
 config/project.json         env name, versions, data paths, scene, drone size
 config/rig.json             the cameras, as hardware: baseline, lens, mounting
 config/brain.json           the brain's settings, each with why
 config/check_setup.py       verifies you have all of it
 
-delta/drone.py              the drone: a sphere that rolls, flies and collides
-delta/sim.py                WORLD SIDE: the house, the navmesh, the sensors
-delta/rig.py                where the lenses are and what they can see
-delta/frames.py             coordinate frames
-delta/wire.py               the socket between the sim and the brain
-delta/brain/                the brain (section 13); never reads Habitat
-
-demo/run_drone.py           the sim window, and the scripts that drive it
 setup/                      the brain env, and RTAB-Map with its bridge
 tests/test_drone.py         flies the drone at things, checks something stopped it
 tests/test_brain.py         the brain's pieces, and that it reads no truth
@@ -567,9 +584,11 @@ tests/scripts/              scripted drives for the tools below
 tools/                      measuring the brain against the truth
 ```
 
-The one line that matters most: **`delta/sim.py` is the only file allowed to
-read Habitat**, and `delta/brain/` gets only what real sensors would give.
-`tests/test_brain.py` checks that.
+The line that matters most: **only the world and the examiner read the
+truth**, and the brain gets only what real sensors would give.
+`tests/test_brain.py` checks that: the brain cannot import Habitat, the
+window sends only sensor fields, and true values only when an oracle switch
+asks for them.
 
 ---
 
