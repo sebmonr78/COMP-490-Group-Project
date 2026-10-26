@@ -217,6 +217,18 @@ class Stopwatch:
 
     def reset(self):
         self.parts, self.loops, self.started = {}, 0, time.monotonic()
+        self.frames = []           # how long each loop took, s: steadiness, not just the average
+        self._last = None
+
+    def tick(self):
+        """Called once a loop: notes how long the loop took."""
+        now = time.perf_counter()
+
+        if self._last is not None:
+            self.frames.append(now - self._last)
+
+        self._last = now
+        self.loops += 1
 
     @contextlib.contextmanager
     def part(self, name):
@@ -236,8 +248,19 @@ class Stopwatch:
         parts = sorted(self.parts.items(), key=lambda item: -item[1])
         line = f"{self.rate():.1f} loops/s | " + "  ".join(
             f"{name} {1000.0 * total / loops:.1f}" for name, total in parts)
+
+        # Steadiness: a few long frames feel like stutter even at a good
+        # average, so the typical frame, the slowest one in twenty, the
+        # slowest of all, and how many took over 50 ms.
+        if self.frames:
+            ms = 1000.0 * np.array(self.frames)
+            line += (f" (ms per loop) | frames: typical {np.median(ms):.0f} ms, 1 in 20 over "
+                     f"{np.percentile(ms, 95):.0f} ms, slowest {ms.max():.0f} ms, over 50 ms: {int((ms > 50).sum())}")
+        else:
+            line += " (ms per loop)"
+
         self.reset()
-        return line + " (ms per loop)"
+        return line
 
 
 # ---------------------------------------------------------------------
@@ -459,7 +482,7 @@ class DroneApp(Examiner):
             with self.watch.part("waiting"):
                 dt = min(timer.tick(FPS_CAP) / 1000.0, 0.1)
             self.clock += dt
-            self.watch.loops += 1
+            self.watch.tick()
 
             with self.watch.part("input"):
                 self._events()
