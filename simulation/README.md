@@ -381,6 +381,7 @@ to the truth).
 | `I` `K` `O` | tilt the cameras up, down, level |
 | drag, scroll the 3D replica | turn it, zoom it; `F` follows the drone or stays put |
 | `[` `]` | the replica without its ceiling (the start), a flat cut lower down, or everything |
+| `B` | build the 3D replica now (with `--replica later`, it is built only then and when the map is saved) |
 | click the map | plan a route **on the brain's own map** |
 | `G` | follow it |
 | `C` | clear it |
@@ -405,6 +406,9 @@ the position being wrong. The general switches, for `run_drone.sh` too:
 |---|---|
 | `--pose oracle` | the true position instead of RTAB-Map's |
 | `--depth oracle` | the true depth instead of Depth Anything's |
+| `--replica later` | keep the views, build the 3D replica only on `B` or at the end (`live`: as it goes; default from `config/brain.json`) |
+| `--profile` | print every 10 s where the window's and the brain's time goes |
+| `--ui 1.25` | make everything bigger or smaller (pixels per point; by default 1.5 on a 4K screen) |
 | `--no-odometer` | take the cage's axle encoder out |
 | `--script FILE` | drive from a script (`tests/scripts/`) |
 | `--trace FILE` | log position error and RTAB-Map health |
