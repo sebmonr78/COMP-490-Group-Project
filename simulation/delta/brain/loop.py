@@ -176,6 +176,9 @@ class Brain:
         # The place in 3D and colour (replica.py), built on its own thread.
         self.replica = replica_module.Replica(settings.replica)
         self._replica_jobs = queue.Queue()
+        self._chores = queue.Queue()        # slow occasional jobs (_do_chores)
+        self._chores_waiting = set()        # ...and which kinds are queued or running
+        self._saving = threading.Lock()     # one save at a time: the autosave, or the last one
         self._replica_sent = -1
         self._replica_at = 0.0
         self.ceiling = None            # replica.Ceiling, once one is seen
@@ -306,6 +309,10 @@ class Brain:
         compress the map while holding the lock perception needs: a stall
         every 30 s.
         """
+        with self._saving:
+            self._save(final)
+
+    def _save(self, final):
         started = time.monotonic()
 
         # The replica's views, to rebuild it from, and the replica itself as
@@ -351,7 +358,7 @@ class Brain:
 
     def run(self):
         """Serve the sim until it disconnects, then save and stop."""
-        for loop in (self._perceive, self._publish, self._build_replica):
+        for loop in (self._perceive, self._publish, self._build_replica, self._do_chores):
             threading.Thread(
                 target=self._guarded(loop), daemon=True, name=loop.__name__
             ).start()
@@ -535,6 +542,38 @@ class Brain:
         # Built only when asked for, the replica is not redrawn either.
         if self.replica_live:
             self._replica_jobs.put(("rebuild", None, poses))
+
+    def _chore(self, kind, *args):
+        """Queue a slow job for _do_chores, unless one of its kind is queued."""
+        if kind not in self._chores_waiting:
+            self._chores_waiting.add(kind)
+            self._chores.put((kind, args))
+
+    def _do_chores(self):
+        """The brain's slow, occasional jobs, on a thread of their own: the
+        autosave (1-1.3 s) and splitting the map into rooms (50-90 ms).
+
+        Done on the publishing thread, they stopped the window hearing from
+        the brain while they ran: the map and the drone's mark froze for
+        over a second every 30 s. Rooms are a view of the map, not something
+        the drone needs to keep flying: a failure is logged and skipped.
+        """
+        while self.running:
+            try:
+                kind, args = self._chores.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            try:
+                if kind == "save":
+                    self.save(final=False)
+                elif kind == "rooms":
+                    self._split_rooms(*args)
+            except Exception as error:
+                traceback.print_exc()
+                self.status(f"{'Saving' if kind == 'save' else 'Splitting rooms'} failed: {error!r}")
+            finally:
+                self._chores_waiting.discard(kind)
 
     def _build_replica(self):
         """The replica's own thread: add views as they come, rebuild after a
@@ -747,7 +786,10 @@ class Brain:
         every = float(self.settings.memory.get("autosave_seconds", 30.0))
 
         while self.running:
-            time.sleep(0.25)
+            # Ten times a second -- as often as the cameras give it frames: the
+            # window's drone marker and depth picture follow the brain at this
+            # rate, and at 4 a second they jumped.
+            time.sleep(0.1)
 
             # Save as it goes, not only on the way out. The map used to be
             # written once, when the sim disconnected -- so a crash, a killed
@@ -758,13 +800,15 @@ class Brain:
                 saved_at = time.monotonic()
 
                 if self.grid is not None:
-                    self.save(final=False)
+                    self._chore("save")
 
             self._measure_resources()
+            started = time.monotonic()
             fields, arrays = self._snapshot()
 
             try:
                 self.link.send("state", fields, arrays)
+                self.timing["publish"] = (time.monotonic() - started) * 1000.0
                 self._send_replica()
             except Closed:
                 return
@@ -905,7 +949,8 @@ class Brain:
                     arrays["solid"] = self.grid.solid_classes()[r0:r1, c0:c1]
 
                     # A copy for splitting into rooms, outside the lock.
-                    if time.monotonic() - self._rooms_at >= float(self.settings.rooms.every_seconds):
+                    if time.monotonic() - self._rooms_at >= float(self.settings.rooms.every_seconds) \
+                            and "rooms" not in self._chores_waiting:
                         plan = (
                             arrays["grid"], self.grid.wall_cells()[r0:r1, c0:c1].copy(),
                             self.grid.to_world([c0, r0]), self.grid.resolution,
@@ -941,14 +986,7 @@ class Brain:
                 ).astype(np.uint8)
 
         if plan is not None:
-            # Rooms are a view of the map, not something the drone needs to
-            # keep flying: a failure here is logged and skipped, never allowed
-            # to stop the state the window lives on.
-            try:
-                self._split_rooms(*plan)
-            except Exception as error:
-                traceback.print_exc()
-                self.status(f"Splitting rooms failed: {error!r}")
+            self._chore("rooms", *plan)
 
         if self._rooms is not None:
             fields["rooms"], arrays["rooms"] = self._rooms
