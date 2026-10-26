@@ -826,6 +826,73 @@ class World:
 
         return result
 
+    # -----------------------------------------------------------------
+    # The rig, one picture at a time
+    # -----------------------------------------------------------------
+
+    def start_rig(self):
+        """Put the rig where the drone is now, for a frame drawn one picture
+        at a time (render_rig_part). Returns where the left lens is -- the
+        frame's true pose -- before anything is drawn.
+
+        observe_rig draws the three pictures in one go, ~40 ms under WSL:
+        one loop in three took that much longer, and the view behind the
+        drone stuttered. Drawn a picture a loop instead, the cost is even.
+        The rig stays where this put it until the last picture is drawn, so
+        all three are from the same instant, as a real stereo pair is.
+        """
+        mount_sensors(self.simulator, self.drone)
+
+        left_name, right_name = self.rig.stereo_pair
+        state = self.simulator.agents[SENSORS].get_state()
+        lens = state.sensor_states[self.rig.rgb_uuid(left_name)]
+        rotation = lens.rotation
+
+        self._rig_parts = [(self.rig.rgb_uuid(left_name), "left"), (self.rig.rgb_uuid(right_name), "right")]
+
+        if self.true_depth:
+            self._rig_parts.append((self.rig.depth_uuid(left_name), "true_depth"))
+
+        self._rig_seen = {
+            "true_position": [float(value) for value in lens.position],
+            "true_rotation": [float(rotation.w), float(rotation.x), float(rotation.y), float(rotation.z)],
+        }
+
+        return dict(self._rig_seen)
+
+    @property
+    def rig_busy(self):
+        """A frame started and not all of its pictures drawn yet."""
+        return bool(getattr(self, "_rig_parts", None))
+
+    def render_rig_part(self):
+        """Draw the next picture of the frame start_rig began. Returns the
+        whole frame -- as observe_rig does -- after the last one, else None.
+
+        Habitat's own get_sensor_observations draws every sensor of an agent
+        and then reads each back; this does the same for one sensor. Its
+        sensors are private to the Simulator (habitat-sim 0.3.3); without
+        them, the whole frame is drawn at once, as before.
+        """
+        sensors = getattr(self.simulator, "_Simulator__sensors", None)
+
+        if sensors is None:
+            seen = self.observe_rig()
+            self._rig_parts = []
+            return seen
+
+        uuid, key = self._rig_parts.pop(0)
+        sensor = sensors[SENSORS][uuid]
+        sensor.draw_observation()
+        picture = sensor.get_observation()
+
+        if key == "true_depth":
+            self._rig_seen[key] = np.squeeze(picture).astype(np.float32)
+        else:
+            self._rig_seen[key] = np.ascontiguousarray(picture[..., :3])
+
+        return None if self._rig_parts else self._rig_seen
+
     def true_depth_at(self, position, rotation_wxyz):
         """True planar depth from a camera at `position` facing `rotation`
         (as observe_rig reports the left lens), and its intrinsics K. For

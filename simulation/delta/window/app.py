@@ -155,6 +155,11 @@ CHASE_NEAREST = 0.45                # never closer than this to the drone
 CHASE_PITCH = -22.0                 # the free camera's starting tilt
 
 
+# The window runs up to this many loops a second. The view behind the drone
+# is drawn on every one; the rest of the window in turn (see _draw).
+FPS_CAP = 60
+BACKGROUND = (14, 16, 20)
+
 # The replica panel takes the ceiling off so the rooms can be seen into, like
 # a dollhouse: every cube within CEILING_MARGIN of the ceiling the BRAIN found
 # over it (or above) is not drawn -- the brain keeps them all. [ and ] step
@@ -418,6 +423,9 @@ class DroneApp(Examiner):
     def run(self, display):
         self.display = display
         self.screen = pygame.Surface(WINDOW)
+        self.screen.fill(BACKGROUND)
+        self._turn = 0                 # which of the other panels is drawn this loop
+        self._pending = None           # a frame taken, its pictures not all drawn yet
         pygame.display.set_caption(f"DELTA | {self.world.scene_id}")
         pygame.key.set_repeat(400, 40)
         self.font = pygame.font.SysFont("DejaVu Sans", px(15))
@@ -431,7 +439,7 @@ class DroneApp(Examiner):
             # busy with depth), time slows rather than the wearer teleporting a
             # metre between two camera frames -- which no real camera sees.
             with self.watch.part("waiting"):
-                dt = min(timer.tick(30) / 1000.0, 0.1)
+                dt = min(timer.tick(FPS_CAP) / 1000.0, 0.1)
             self.clock += dt
             self.watch.loops += 1
 
@@ -444,14 +452,21 @@ class DroneApp(Examiner):
                 with self.watch.part("script"):
                     self.script.step(dt)
 
-            # Habitat draws the cameras on one loop in three: that loop keeps
-            # the view behind the drone it already has instead of drawing it
-            # too -- drawing both made every third frame twice as long.
-            self._drew_cameras = self.clock >= self.next_frame
+            # The cameras: every sensor read at the frame's moment, and its
+            # three pictures drawn one a loop (~13 ms each) instead of all at
+            # once (~40 ms, a stutter every third frame). Behind -- the next
+            # frame already due -- the rest are drawn at once, so the brain
+            # still gets its 10 frames a second.
+            behind = self.clock >= self.next_frame
 
-            if self._drew_cameras:
+            if self.world.rig_busy:
+                with self.watch.part("cameras"):
+                    self._continue_frame(rest=behind)
+
+            if behind and not self.world.rig_busy:
                 with self.watch.part("cameras"):
                     self._send_frame()
+                    self._continue_frame()
                 self.next_frame = self.clock + 1.0 / self.frame_rate
 
             with self.watch.part("brain in"):
@@ -824,9 +839,12 @@ class DroneApp(Examiner):
     # -----------------------------------------------------------------
 
     def _send_frame(self):
-        with self.watch.part("cameras: render"):
-            seen = self.world.observe_rig()
-        self.last_glasses = seen
+        """Take a frame: every sensor read now, at the frame's moment. Its
+        camera pictures are drawn over the next loops (_continue_frame), all
+        from where the drone is now, and the frame goes to the brain when the
+        last is done (_finish_frame)."""
+        seen = self.world.start_rig()
+        self._pending = None
 
         # The examiner notes where the drone really was for this frame. Its
         # notes stay here, in the window; none of it goes to the brain.
@@ -890,7 +908,8 @@ class DroneApp(Examiner):
             if not self.world.flying and not self.args.no_odometer:
                 fields["odometer"] = self.odometer.total
 
-            arrays = {"left": seen["left"], "right": seen["right"]}
+            # The pictures to send, once drawn: name in the message -> picture.
+            pictures = {"left": "left", "right": "right"}
 
             # Oracle fields only when the experiment asked for them.
             if self.args.pose == "oracle":
@@ -898,12 +917,35 @@ class DroneApp(Examiner):
                 fields["true_rotation"] = seen["true_rotation"]
 
             if self.args.depth == "oracle":
-                arrays["true_depth"] = seen["true_depth"]
+                pictures["true_depth"] = "true_depth"
 
-            with self.watch.part("cameras: send"):
-                self.brain.send("frame", fields, arrays)
+            self._pending = (fields, pictures)
 
         self.frame_id += 1
+
+    def _continue_frame(self, rest=False):
+        """Draw the next picture of the frame (all the rest if `rest`); send
+        the frame when the last is done."""
+        while self.world.rig_busy:
+            with self.watch.part("cameras: render"):
+                seen = self.world.render_rig_part()
+
+            if seen is not None:
+                self._finish_frame(seen)
+
+            if not rest:
+                break
+
+    def _finish_frame(self, seen):
+        self.last_glasses = seen
+
+        if self._pending is not None and self.brain is not None and self.brain.connected:
+            fields, pictures = self._pending
+
+            with self.watch.part("cameras: send"):
+                self.brain.send("frame", fields, {name: seen[source] for name, source in pictures.items()})
+
+        self._pending = None
 
     def _drain_brain(self):
         if self.brain is None:
@@ -934,34 +976,65 @@ class DroneApp(Examiner):
     # -----------------------------------------------------------------
 
     def _draw(self):
+        """The view behind the drone every loop -- what you watch while you
+        drive -- and of the rest, one part a loop in turn (each about 8 times
+        a second): the map, the replica, the camera pictures, the text. Only
+        what was drawn is put on the screen.
+
+        Drawing and showing all of it every loop took ~50 ms on a 4K
+        screen, so the view you steer by moved at 15-20 frames a second;
+        the map and the text need nothing like that.
+        """
         screen = self.screen
-        screen.fill((14, 16, 20))
 
         with self.watch.part("3D view"):
             self._draw_viewer()
-        with self.watch.part("map"):
-            self._draw_map()
-        with self.watch.part("replica"):
-            self._draw_replica()
-        with self.watch.part("feeds"):
-            self._draw_feeds()
-        with self.watch.part("text"):
-            self._draw_transcript()
-            self._draw_status()
+
+        changed = [pygame.Rect(0, 0, PANEL, TOP)]
+        part = self._turn % 4
+        self._turn += 1
+
+        if part == 0:
+            with self.watch.part("map"):
+                self._draw_map()
+            changed.append(pygame.Rect(MAP_X, 0, PANEL, TOP))
+        elif part == 1:
+            with self.watch.part("replica"):
+                self._draw_replica()
+            changed.append(pygame.Rect(REPLICA_X, 0, WINDOW[0] - REPLICA_X, TOP))
+        elif part == 2:
+            with self.watch.part("feeds"):
+                strip = pygame.Rect(0, TOP, LOG_LEFT, STATUS_TOP - TOP)
+                screen.fill(BACKGROUND, strip)
+                self._draw_feeds()
+            changed.append(strip)
+        else:
+            with self.watch.part("text"):
+                log = pygame.Rect(LOG_LEFT, TOP, WINDOW[0] - LOG_LEFT, STATUS_TOP - TOP)
+                status = pygame.Rect(0, STATUS_TOP, WINDOW[0], WINDOW[1] - STATUS_TOP)
+                screen.fill(BACKGROUND, log)
+                screen.fill(BACKGROUND, status)
+                self._draw_transcript()
+                self._draw_status()
+            changed += [log, status]
 
         for x in (MAP_X, REPLICA_X):
             pygame.draw.line(screen, (60, 64, 72), (x, 0), (x, TOP), px(2))
 
         pygame.draw.line(screen, (60, 64, 72), (0, TOP), (WINDOW[0], TOP), px(2))
+        changed.append(pygame.Rect(0, TOP - px(2), WINDOW[0], px(4)))
 
-        # The drawing, scaled to the window as it is now.
+        # Only what changed goes to the screen -- unless the window was
+        # resized and the drawing has to be scaled to it, all of it.
         with self.watch.part("show"):
             if self.display.get_size() == WINDOW:
-                self.display.blit(screen, (0, 0))
+                for rect in changed:
+                    self.display.blit(screen, rect, rect)
+
+                pygame.display.update(changed)
             else:
                 self.display.blit(pygame.transform.smoothscale(screen, self.display.get_size()), (0, 0))
-
-            pygame.display.flip()
+                pygame.display.flip()
 
     def _print_profile(self):
         """The window's parts, and the brain's own, to stdout."""
@@ -1237,27 +1310,22 @@ class DroneApp(Examiner):
 
     def _draw_viewer(self):
         """The drone from behind: Habitat renders it at one pixel a point
-        (on 4K, 44% of the panel's pixels), scaled up -- and not at all on
-        a loop that drew the cameras; the last picture stands in."""
-        if getattr(self, "_drew_cameras", False) and getattr(self, "_viewer_surface", None) is not None:
-            self.screen.blit(self._viewer_surface, (0, 0))
+        (on 4K, 44% of the panel's pixels), scaled up."""
+        if not self.free_camera:
+            self._place_chase_camera()
         else:
-            if not self.free_camera:
-                self._place_chase_camera()
-            else:
-                self.world.viewer_node.rotation = mn.Quaternion.rotation(
-                    mn.Deg(self.camera_yaw), mn.Vector3.y_axis()
-                ) * mn.Quaternion.rotation(mn.Deg(self.camera_pitch), mn.Vector3.x_axis())
+            self.world.viewer_node.rotation = mn.Quaternion.rotation(
+                mn.Deg(self.camera_yaw), mn.Vector3.y_axis()
+            ) * mn.Quaternion.rotation(mn.Deg(self.camera_pitch), mn.Vector3.x_axis())
 
-            self._outline_drone()
-            image = self.world.observe_viewer()
-            surface = pygame.surfarray.make_surface(np.transpose(image[:, :, :3], (1, 0, 2)))
+        self._outline_drone()
+        image = self.world.observe_viewer()
+        surface = pygame.surfarray.make_surface(np.transpose(image[:, :, :3], (1, 0, 2)))
 
-            if surface.get_size() != (PANEL, TOP):
-                surface = pygame.transform.smoothscale(surface, (PANEL, TOP))
+        if surface.get_size() != (PANEL, TOP):
+            surface = pygame.transform.smoothscale(surface, (PANEL, TOP))
 
-            self._viewer_surface = surface
-            self.screen.blit(surface, (0, 0))
+        self.screen.blit(surface, (0, 0))
 
         label = "Free camera (WASD, IJKL, Z/X) - V to follow" if self.free_camera else "Behind you - V for free camera"
         self._text(label, (px(12), px(10)), self.big, (240, 240, 240))
