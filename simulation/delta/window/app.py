@@ -52,6 +52,7 @@ Keys:
 """
 
 import argparse
+import collections
 import contextlib
 import math
 import os
@@ -72,7 +73,9 @@ import pygame  # noqa: E402
 from delta import frames  # noqa: E402
 from delta.brain import config as brain_config  # noqa: E402
 from delta.drone import FAST, TILT_SPEED, TURN_SPEED, WALK_SPEED  # noqa: E402
+from delta.rig_process import RigProcess  # noqa: E402
 from delta.sim import ClimbRate, Imu, Odometer, Rangefinder, World, first_hit  # noqa: E402
+from delta.window.background import Background  # noqa: E402
 from delta.window.colours import (  # noqa: E402
     DOOR_COLOUR, DRONE_BELIEVED, DRONE_TRUE, FREE_COLOUR, KIND_COLOURS, OCCUPIED_COLOUR,
     PLACE_COLOUR, ROLL_UNDER_COLOUR, ROOM_COLOURS, ROUTE_COLOUR, TARGET_COLOUR, THING_COLOUR,
@@ -193,6 +196,8 @@ def parse_arguments():
     parser.add_argument("--roam", action="store_true",
                         help="start roaming straight away, to build a map without a driver")
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--no-camera-process", action="store_true",
+                        help="draw the cameras' pictures in the window instead of a process of their own")
     parser.add_argument("--replica", choices=["live", "later"], default=None,
                         help="build the 3D replica as it goes, or only on B / at the end (default: brain.json)")
     parser.add_argument("--ui", type=float, default=None,
@@ -249,6 +254,17 @@ class DroneApp(Examiner):
     def __init__(self, args):
         self.args = args
         self.settings = brain_config.load()
+
+        # The cameras' pictures are drawn by a process of their own
+        # (rig_process.py), started first so it loads the house while this
+        # one does. Until it is ready -- or if it fails -- they are drawn here.
+        self.cameras = None
+
+        if not args.no_camera_process:
+            try:
+                self.cameras = RigProcess("process", true_depth=(args.depth == "oracle"))
+            except Exception as error:
+                print(f"Drawing the cameras in the window: the camera process did not start ({error!r})")
 
         print("Opening the house...")
         self.world = World(stage="process", true_depth=(args.depth == "oracle"),
@@ -321,7 +337,6 @@ class DroneApp(Examiner):
         self.monitor = Monitor()       # memory, CPU, GPU, every 2 s
         self.replica_cut = "ceiling"   # a height, "ceiling", or None: all
         self._replica_shown = None     # (key, centres, colours) last drawn
-        self._map_cache = None         # (state, what is shown, the layers, when)
         self._replica_picture = None   # (cubes picture, scaled to the panel)
         self._blits = {}               # place -> (image, size, scaled surface)
         self._dragging = None
@@ -424,7 +439,10 @@ class DroneApp(Examiner):
         self.display = display
         self.screen = pygame.Surface(WINDOW)
         self.screen.fill(BACKGROUND)
-        self._turn = 0                 # which of the other panels is drawn this loop
+        self._rendered = {}            # (text, font, colour) -> rendered text
+        self._map_worker = Background("map layers")
+        self._map_asked = None         # (state, what is shown, when) of the last layers asked for
+        self._poses = collections.deque(maxlen=2)   # (when, pose): the brain's last two
         self._pending = None           # a frame taken, its pictures not all drawn yet
         pygame.display.set_caption(f"DELTA | {self.world.scene_id}")
         pygame.key.set_repeat(400, 40)
@@ -452,22 +470,8 @@ class DroneApp(Examiner):
                 with self.watch.part("script"):
                     self.script.step(dt)
 
-            # The cameras: every sensor read at the frame's moment, and its
-            # three pictures drawn one a loop (~13 ms each) instead of all at
-            # once (~40 ms, a stutter every third frame). Behind -- the next
-            # frame already due -- the rest are drawn at once, so the brain
-            # still gets its 10 frames a second.
-            behind = self.clock >= self.next_frame
-
-            if self.world.rig_busy:
-                with self.watch.part("cameras"):
-                    self._continue_frame(rest=behind)
-
-            if behind and not self.world.rig_busy:
-                with self.watch.part("cameras"):
-                    self._send_frame()
-                    self._continue_frame()
-                self.next_frame = self.clock + 1.0 / self.frame_rate
+            with self.watch.part("cameras"):
+                self._cameras_step()
 
             with self.watch.part("brain in"):
                 self._drain_brain()
@@ -482,6 +486,9 @@ class DroneApp(Examiner):
 
         if self.brain is not None:
             self.brain.close()
+
+        if self.cameras is not None:
+            self.cameras.close()
 
         self.world.close()
         pygame.quit()
@@ -838,12 +845,53 @@ class DroneApp(Examiner):
     # The cameras, to the brain
     # -----------------------------------------------------------------
 
-    def _send_frame(self):
+    def _cameras_step(self):
+        """Ten frames a second for the brain.
+
+        Each frame: every sensor read at its moment (_send_frame), its
+        pictures drawn from where the drone was then, and the frame sent
+        when they are done (_finish_frame). The pictures are drawn by the
+        camera process when it is running, in parallel with this loop;
+        otherwise here, one a loop (~13 ms each) rather than all at once
+        (~40 ms, a stutter every third loop) -- and, when behind, the rest
+        at once, so the brain still gets its frames.
+        """
+        due = self.clock >= self.next_frame
+        cameras = self.cameras
+
+        if cameras is not None:
+            seen = cameras.poll()
+
+            if seen is not None:
+                self._finish_frame(seen)
+
+            if cameras.failed:
+                self.note(f"Drawing the cameras in the window: {cameras.failed}")
+                cameras.close()
+                self.cameras = cameras = None
+
+        if self.world.rig_busy:
+            self._continue_frame(rest=due)
+            return
+
+        if cameras is not None and cameras.ready:
+            if due and cameras.busy is None:
+                self._send_frame(draw=False)
+                cameras.request(self.frame_id - 1, *self.world.rig_pose())
+                self.next_frame = self.clock + 1.0 / self.frame_rate
+            return
+
+        if due:
+            self._send_frame()
+            self._continue_frame()
+            self.next_frame = self.clock + 1.0 / self.frame_rate
+
+    def _send_frame(self, draw=True):
         """Take a frame: every sensor read now, at the frame's moment. Its
-        camera pictures are drawn over the next loops (_continue_frame), all
-        from where the drone is now, and the frame goes to the brain when the
-        last is done (_finish_frame)."""
-        seen = self.world.start_rig()
+        camera pictures come later, all from where the drone is now --
+        drawn here (_continue_frame) or by the camera process -- and the
+        frame goes to the brain when the last is done (_finish_frame)."""
+        seen = self.world.start_rig(draw=draw)
         self._pending = None
 
         # The examiner notes where the drone really was for this frame. Its
@@ -947,6 +995,36 @@ class DroneApp(Examiner):
 
         self._pending = None
 
+    def _shown_pose(self):
+        """Where the brain thinks the drone is, as drawn: glided between its
+        last two updates instead of jumping ten times a second -- the way
+        games draw between physics steps. It is shown one update late (0.1
+        s) and smooth; a jump of over a metre (a loop closure) is drawn as a
+        jump, not a slide."""
+        if not self._poses:
+            return None
+
+        if len(self._poses) == 1:
+            return self._poses[-1][1]
+
+        (t0, a), (t1, b) = self._poses[-2], self._poses[-1]
+
+        if math.hypot(b["x"] - a["x"], b["y"] - a["y"]) > 1.0:
+            return b
+
+        f = min(1.0, (time.monotonic() - t1) / max(t1 - t0, 1e-3))
+
+        def mix(u, v):
+            return u + f * (v - u)
+
+        shown = dict(b, x=mix(a["x"], b["x"]), y=mix(a["y"], b["y"]),
+                     yaw=a["yaw"] + f * frames.wrap(b["yaw"] - a["yaw"]))
+
+        if "body" in a and "body" in b:
+            shown["body"] = [mix(a["body"][0], b["body"][0]), mix(a["body"][1], b["body"][1])]
+
+        return shown
+
     def _drain_brain(self):
         if self.brain is None:
             return
@@ -962,6 +1040,10 @@ class DroneApp(Examiner):
 
         state = self.brain.state
 
+        if state and "pose" in state and state is not getattr(self, "_posed_state", None):
+            self._posed_state = state
+            self._poses.append((time.monotonic(), state["pose"]))
+
         if state and "pose" in state:
             pose = state["pose"]
             truth = self.truth_by_frame.get(pose["frame"])
@@ -976,47 +1058,46 @@ class DroneApp(Examiner):
     # -----------------------------------------------------------------
 
     def _draw(self):
-        """The view behind the drone every loop -- what you watch while you
-        drive -- and of the rest, one part a loop in turn (each about 8 times
-        a second): the map, the replica, the camera pictures, the text. Only
-        what was drawn is put on the screen.
-
-        Drawing and showing all of it every loop took ~50 ms on a 4K
-        screen, so the view you steer by moved at 15-20 frames a second;
-        the map and the text need nothing like that.
+        """Every panel, every loop -- each from what it keeps, so that is
+        cheap: the map's layers, the replica's picture and the cameras'
+        pictures are redrawn only when they change, the marks on them every
+        loop. The text is drawn again when the brain says something new, or
+        twice a second for the numbers. Only what changed goes to the screen.
         """
         screen = self.screen
 
         with self.watch.part("3D view"):
             self._draw_viewer()
+        with self.watch.part("map"):
+            self._draw_map()
+        with self.watch.part("replica"):
+            self._draw_replica()
 
-        changed = [pygame.Rect(0, 0, PANEL, TOP)]
-        part = self._turn % 4
-        self._turn += 1
+        changed = [pygame.Rect(0, 0, WINDOW[0], TOP)]
 
-        if part == 0:
-            with self.watch.part("map"):
-                self._draw_map()
-            changed.append(pygame.Rect(MAP_X, 0, PANEL, TOP))
-        elif part == 1:
-            with self.watch.part("replica"):
-                self._draw_replica()
-            changed.append(pygame.Rect(REPLICA_X, 0, WINDOW[0] - REPLICA_X, TOP))
-        elif part == 2:
-            with self.watch.part("feeds"):
+        with self.watch.part("feeds"):
+            pictures = (id(self.last_glasses), id((self.brain.state_arrays or {}).get("depth")) if self.brain else None)
+
+            if pictures != getattr(self, "_feeds_shown", None):
+                self._feeds_shown = pictures
                 strip = pygame.Rect(0, TOP, LOG_LEFT, STATUS_TOP - TOP)
                 screen.fill(BACKGROUND, strip)
                 self._draw_feeds()
-            changed.append(strip)
-        else:
-            with self.watch.part("text"):
+                changed.append(strip)
+
+        with self.watch.part("text"):
+            news = (id(self.brain.state) if self.brain else None, len(self.transcript),
+                    self.transcript[-1] if self.transcript else None)
+
+            if news != getattr(self, "_text_shown", None) or time.monotonic() - getattr(self, "_text_at", 0.0) > 0.5:
+                self._text_shown, self._text_at = news, time.monotonic()
                 log = pygame.Rect(LOG_LEFT, TOP, WINDOW[0] - LOG_LEFT, STATUS_TOP - TOP)
                 status = pygame.Rect(0, STATUS_TOP, WINDOW[0], WINDOW[1] - STATUS_TOP)
                 screen.fill(BACKGROUND, log)
                 screen.fill(BACKGROUND, status)
                 self._draw_transcript()
                 self._draw_status()
-            changed += [log, status]
+                changed += [log, status]
 
         for x in (MAP_X, REPLICA_X):
             pygame.draw.line(screen, (60, 64, 72), (x, 0), (x, TOP), px(2))
@@ -1056,8 +1137,10 @@ class DroneApp(Examiner):
         state = self.brain.state if self.brain else None
         markers = []
 
-        if state and "pose" in state:
-            body = state["pose"].get("body", [state["pose"]["x"], state["pose"]["y"]])
+        shown_pose = self._shown_pose()
+
+        if state and shown_pose is not None:
+            body = shown_pose.get("body", [shown_pose["x"], shown_pose["y"]])
             altitude = float(state.get("stats", {}).get("altitude") or 0.0)
             believed = (body[0], body[1], altitude + float(self.drone_config["diameter"]) / 2.0)
             markers.append((believed, (255, 150, 50), 9))
@@ -1354,25 +1437,43 @@ class DroneApp(Examiner):
         # state (a few times a second) or a key changed what is shown, not
         # on every frame; the marks over them are drawn every frame.
         shown = (self.show_truth, self.show_rooms, self.alignment.ready)
-        cached = self._map_cache
+        asked = self._map_asked
 
-        # At most 4 times a second, though: at 4K a redraw is ~20 ms, and
-        # the map grows slowly -- the drone's mark moves every frame anyway.
-        stale = cached is None or (cached[0] is not state and time.monotonic() - cached[3] >= 0.25)
+        # At most ~7 times a second, and on the worker, not in this loop:
+        # at 4K a redraw is ~15 ms -- a spike every time the brain sent news.
+        # The marks over the layers (the drone) are drawn here, every loop.
+        stale = asked is None or (asked[0] is not state and time.monotonic() - asked[2] >= 0.15)
 
-        if stale or cached[1] != shown:
+        if stale or asked[1] != shown:
             if state:
                 self._widen_view_for(state, arrays)
 
-            canvas = self._map_layers(state, arrays)
-            surface = pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2)))
-            cached = self._map_cache = (state, shown, pygame.transform.smoothscale(surface, (PANEL, TOP)),
-                                        time.monotonic())
+            # Where everything goes on the panel, worked out here, so the
+            # worker never reads the view while this loop changes it.
+            affines = {"truth": self.truth_affine / UI}
 
-        self.screen.blit(cached[2], (MAP_X, 0))
+            if state and self.alignment.ready:
+                for layer in ("grid", "rooms"):
+                    if layer in state:
+                        affines[layer] = self._panel_affine(state[layer]) / UI
+
+            self._map_worker.ask(self._map_picture, state, arrays, shown, affines)
+            self._map_asked = (state, shown, time.monotonic())
+
+        picture = self._map_worker.latest()
+
+        if picture is not None:
+            self.screen.blit(picture, (MAP_X, 0))
+
         self._map_marks(state)
 
-    def _map_layers(self, state, arrays):
+    def _map_picture(self, state, arrays, shown, affines):
+        """The map's layers as a panel-sized picture (on the worker)."""
+        canvas = self._map_layers(state, arrays, shown, affines)
+        surface = pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2)))
+        return pygame.transform.smoothscale(surface, (PANEL, TOP))
+
+    def _map_layers(self, state, arrays, shown, affines):
         """The map panel's picture: the true layout, the brain's map, its
         rooms."""
         # At one pixel a point: on 4K the panel has 2.25 times the pixels,
@@ -1381,19 +1482,21 @@ class DroneApp(Examiner):
         canvas = np.zeros((size[1], size[0], 3), np.uint8)
         canvas[:] = (20, 23, 28)
 
-        if self.show_truth:
+        show_truth, show_rooms, ready = shown
+
+        if show_truth:
             # The true layout never changes; only the panel's scale does.
-            view = self.truth_affine.tobytes()
+            view = affines["truth"].tobytes()
 
             if getattr(self, "_truth_warped", (None,))[0] != view:
-                self._truth_warped = (view, cv2.warpAffine(self.truth_layer, self.truth_affine / UI, size,
+                self._truth_warped = (view, cv2.warpAffine(self.truth_layer, affines["truth"], size,
                                                            flags=cv2.INTER_NEAREST))
 
             canvas = np.maximum(canvas, self._truth_warped[1])
 
-        if state and "grid" in state and "grid" in arrays and self.alignment.ready:
+        if state and "grid" in state and "grid" in arrays and "grid" in affines:
             grid = arrays["grid"]
-            affine = self._panel_affine(state["grid"]) / UI
+            affine = affines["grid"]
 
             # What is there, from the solid layer -- white where anything
             # stands, at any height, like the glasses' map -- and, from the
@@ -1413,9 +1516,9 @@ class DroneApp(Examiner):
             canvas[mask > 0] = warped[mask > 0]
 
         # The brain's rooms, each its own tint over the map (N to hide).
-        if self.show_rooms and state and "rooms" in state and "rooms" in arrays and self.alignment.ready:
+        if show_rooms and state and "rooms" in state and "rooms" in arrays and "rooms" in affines:
             labels = arrays["rooms"]
-            warped = cv2.warpAffine(labels.astype(np.uint8), self._panel_affine(state["rooms"]) / UI,
+            warped = cv2.warpAffine(labels.astype(np.uint8), affines["rooms"],
                                     size, flags=cv2.INTER_NEAREST)
             # Only the free floor is tinted: what is occupied stays white, so
             # the rooms never hide the map underneath them.
@@ -1468,8 +1571,9 @@ class DroneApp(Examiner):
                     self._text(f"room {room['id']}  {room['area']:.0f} m2",
                                p - (px(30), px(7)), self.small, (250, 250, 250))
 
-            if "pose" in state:
-                pose = state["pose"]
+            pose = self._shown_pose()
+
+            if pose is not None:
                 p = np.array(self.to_panel(self.alignment.point((pose["x"], pose["y"])))) + offset
                 heading = pose["yaw"] + self.alignment.yaw
                 tip = p + px(16) * np.array([math.cos(heading), -math.sin(heading)])
@@ -1595,10 +1699,12 @@ class DroneApp(Examiner):
         sources = stats.get("sources", {})
 
         parts = [
-            f"window {self.timer.get_fps():.0f} fps",
+            f"screen {self.timer.get_fps():.0f} fps",
             f"pose {sources.get('pose')}  depth {sources.get('depth')}",
-            f"frames {rates.get('frames', 0):.0f}/s  perception {rates.get('perception', 0):.1f}/s "
-            f"(DA3 {ms.get('depth', 0)} ms, map {ms.get('map', 0)} ms)",
+            # The cameras run at 10 frames a second, like the real ones: the
+            # brain's rate, not the screen's.
+            f"brain: camera {rates.get('frames', 0):.0f} frames/s, thought through {rates.get('perception', 0):.1f}/s "
+            f"(depth {ms.get('depth', 0)} ms, map {ms.get('map', 0)} ms)",
         ]
 
         self._draw_height(stats)
@@ -1738,7 +1844,18 @@ class DroneApp(Examiner):
         self.screen.blit(cached[2], position)
 
     def _text(self, text, position, font, colour):
-        self.screen.blit(font.render(text, True, colour), (int(position[0]), int(position[1])))
+        """Text, rendered once and kept: most of the window's text is the
+        same from one loop to the next, and rendering it is the slow part."""
+        key = (text, id(font), tuple(colour))
+        rendered = self._rendered.get(key)
+
+        if rendered is None:
+            if len(self._rendered) > 2000:
+                self._rendered.clear()
+
+            rendered = self._rendered[key] = font.render(text, True, colour)
+
+        self.screen.blit(rendered, (int(position[0]), int(position[1])))
 
     def screenshot(self, name=None):
         folder = PROJECT_ROOT / "outputs" / "screenshots"

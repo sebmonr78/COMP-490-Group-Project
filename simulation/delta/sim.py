@@ -830,10 +830,11 @@ class World:
     # The rig, one picture at a time
     # -----------------------------------------------------------------
 
-    def start_rig(self):
+    def start_rig(self, draw=True):
         """Put the rig where the drone is now, for a frame drawn one picture
-        at a time (render_rig_part). Returns where the left lens is -- the
-        frame's true pose -- before anything is drawn.
+        at a time (render_rig_part) -- or, with `draw` False, drawn by the
+        camera process (rig_process.py) from rig_pose(). Returns where the
+        left lens is -- the frame's true pose -- before anything is drawn.
 
         observe_rig draws the three pictures in one go, ~40 ms under WSL:
         one loop in three took that much longer, and the view behind the
@@ -853,12 +854,23 @@ class World:
         if self.true_depth:
             self._rig_parts.append((self.rig.depth_uuid(left_name), "true_depth"))
 
+        if not draw:
+            self._rig_parts = []
+
         self._rig_seen = {
             "true_position": [float(value) for value in lens.position],
             "true_rotation": [float(rotation.w), float(rotation.x), float(rotation.y), float(rotation.z)],
         }
 
         return dict(self._rig_seen)
+
+    def rig_pose(self):
+        """Where start_rig put the rig: (translation, rotation wxyz)."""
+        node = self.simulator.agents[SENSORS].scene_node
+        rotation = node.rotation
+
+        return ([float(v) for v in node.translation],
+                [float(rotation.scalar)] + [float(v) for v in rotation.vector])
 
     @property
     def rig_busy(self):
