@@ -94,7 +94,7 @@ def the_truth_is_only_sent_when_asked_for():
     inside an `if` whose text mentions "oracle". Moving one of these lines out
     of its guard by accident is exactly the edit this is here to catch.
     """
-    source = (PROJECT_ROOT / "demo" / "run_drone.py").read_text()
+    source = (PROJECT_ROOT / "delta" / "window" / "app.py").read_text()
     tree = ast.parse(source)
     lines = source.splitlines()
 
@@ -177,7 +177,8 @@ def every_setting_the_code_reads_exists():
     """
     data = json.loads((PROJECT_ROOT / "config" / "brain.json").read_text())
     files = [PROJECT_ROOT / "delta" / "brain" / "loop.py", PROJECT_ROOT / "delta" / "brain" / "__main__.py",
-             PROJECT_ROOT / "demo" / "run_drone.py", *sorted((PROJECT_ROOT / "tools").glob("*.py"))]
+             *sorted((PROJECT_ROOT / "delta" / "window").glob("*.py")),
+             *sorted((PROJECT_ROOT / "tools").glob("*.py"))]
 
     def chain(node):
         """['settings', 'drone', 'radius'] for self.settings.drone.radius."""
@@ -196,7 +197,7 @@ def every_setting_the_code_reads_exists():
 
     for path in files:
         source = path.read_text()
-        is_root = "config.load()" in source or path.name in ("loop.py", "__main__.py", "run_drone.py")
+        is_root = "config.load()" in source or path.name in ("loop.py", "__main__.py") or path.parent.name == "window"
 
         for node in ast.walk(ast.parse(source)):
             if not isinstance(node, ast.Attribute):
@@ -246,7 +247,7 @@ def the_sim_sends_only_what_sensors_measure():
     That is not hypothetical: the sim sent Habitat's altitude as plain
     "altitude" for weeks, and the brain built every flying map from it.
     """
-    source = (PROJECT_ROOT / "demo" / "run_drone.py").read_text()
+    source = (PROJECT_ROOT / "delta" / "window" / "app.py").read_text()
     tree = ast.parse(source)
 
     sender = next(
