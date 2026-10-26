@@ -56,6 +56,7 @@ import collections
 import contextlib
 import math
 import os
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -219,6 +220,8 @@ class Stopwatch:
         self.parts, self.loops, self.started = {}, 0, time.monotonic()
         self.frames = []           # how long each loop took, s: steadiness, not just the average
         self._last = None
+        self._this_frame = {}      # part -> seconds, in the loop under way
+        self.slow = {}             # part -> how many slow loops it was the biggest part of
 
     def tick(self):
         """Called once a loop: notes how long the loop took."""
@@ -227,7 +230,13 @@ class Stopwatch:
         if self._last is not None:
             self.frames.append(now - self._last)
 
+            # A slow loop (over 45 ms): which part was the biggest in it.
+            if now - self._last > 0.045 and self._this_frame:
+                blamed = max(self._this_frame, key=self._this_frame.get)
+                self.slow[blamed] = self.slow.get(blamed, 0) + 1
+
         self._last = now
+        self._this_frame = {}
         self.loops += 1
 
     @contextlib.contextmanager
@@ -237,7 +246,9 @@ class Stopwatch:
         try:
             yield
         finally:
-            self.parts[name] = self.parts.get(name, 0.0) + time.perf_counter() - start
+            took = time.perf_counter() - start
+            self.parts[name] = self.parts.get(name, 0.0) + took
+            self._this_frame[name] = self._this_frame.get(name, 0.0) + took
 
     def rate(self):
         return self.loops / max(time.monotonic() - self.started, 1e-6)
@@ -256,6 +267,10 @@ class Stopwatch:
             ms = 1000.0 * np.array(self.frames)
             line += (f" (ms per loop) | frames: typical {np.median(ms):.0f} ms, 1 in 20 over "
                      f"{np.percentile(ms, 95):.0f} ms, slowest {ms.max():.0f} ms, over 50 ms: {int((ms > 50).sum())}")
+
+            if self.slow:
+                line += " | slow loops, biggest part: " + ", ".join(
+                    f"{name} {count}" for name, count in sorted(self.slow.items(), key=lambda kv: -kv[1]))
         else:
             line += " (ms per loop)"
 
@@ -1884,8 +1899,18 @@ class DroneApp(Examiner):
         folder = PROJECT_ROOT / "outputs" / "screenshots"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{name or time.strftime('%Y%m%d-%H%M%S')}.png"
-        pygame.image.save(self.screen, str(path))
-        print(f"Saved {path}")
+
+        # A copy now, written on a thread: writing a 4K PNG takes most of a
+        # second, and done here it froze the window for that long.
+        picture = self.screen.copy()
+
+        def write():
+            pygame.image.save(picture, str(path))
+            print(f"Saved {path}", flush=True)
+
+        writer = threading.Thread(target=write, name="screenshot")
+        writer.start()
+        self._writers = [w for w in getattr(self, "_writers", []) if w.is_alive()] + [writer]
 
 
 def _wrap(text, font, width):
