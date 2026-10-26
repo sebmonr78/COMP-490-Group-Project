@@ -170,8 +170,15 @@
    "anything above max_height (sky through a window, a vaulted ceiling",
    "the map has no use for). step: every step-th depth pixel. Sent to",
    "the window every every_seconds when it has changed. Each view is",
-   "thinned to one point per `thin`-metre cell before it is kept."
+   "thinned to one point per `thin`-metre cell before it is kept.",
+   "",
+   "live: build the cubes as the drone goes and send them every",
+   "every_seconds. false: only keep the views -- the cheap part, a few ms",
+   "each -- and build the cubes when asked (B in the window, or a script's",
+   "build_replica) and when the map is saved. The replica is for people to",
+   "look at; nothing the drone does needs it while it flies."
   ],
+  "live": true,
   "voxel": 0.05,
   "thin": 0.025,
   "min_seen": 2,

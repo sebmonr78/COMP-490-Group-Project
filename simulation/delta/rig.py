@@ -553,7 +553,7 @@ def sensor_specs(rig, stage="capture", ground_truth_depth=False):
     relative to that agent's node -- which, for DELTA, is the centre of the
     drone sphere.
 
-    `ground_truth_depth` adds a depth sensor beside each colour one. The
+    `ground_truth_depth` adds a depth sensor beside the left lens. The
     real drone has none. It is an evaluation oracle: score perception
     against it, never feed perception from it.
     """
@@ -568,7 +568,9 @@ def sensor_specs(rig, stage="capture", ground_truth_depth=False):
             (rig.rgb_uuid(camera.name), habitat_sim.SensorType.COLOR),
         ]
 
-        if ground_truth_depth:
+        # Only beside the left lens: that is the depth the brain's map is
+        # in. Rendering the right one too cost a quarter of every frame.
+        if ground_truth_depth and camera.name == rig.stereo_pair[0]:
             kinds.append(
                 (rig.depth_uuid(camera.name), habitat_sim.SensorType.DEPTH)
             )

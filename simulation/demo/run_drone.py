@@ -43,6 +43,7 @@ Keys:
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -68,28 +69,53 @@ from habitat.utils.visualizations import maps  # noqa: E402
 from delta import frames, wire  # noqa: E402
 from delta.brain import config as brain_config  # noqa: E402
 from delta.sim import ClimbRate, Imu, Odometer, Rangefinder, World, first_hit  # noqa: E402
-from delta.view3d import OrbitView  # noqa: E402
+from delta.view3d import OrbitView, Painter  # noqa: E402
 
-# The window, in its own pixels. It is drawn at this size and scaled to
-# whatever size the window really is -- it opens to fit the screen and can
-# be resized -- so nothing below depends on the screen.
+# The window is laid out for the screen it opens on (layout(), once, before
+# anything is drawn), and drawn at that size: scaling a fixed-size drawing up
+# to a 4K screen cost 12-15 ms a frame. Sizes in this file are in points, and
+# px() turns them into pixels.
+UI = 1.0
 WINDOW = (1920, 1080)
 
-# Three panels across the top: the 3D view, the 2D map, the 3D replica.
-PANEL = 640
-TOP = 600
-MAP_X = PANEL
-REPLICA_X = 2 * PANEL
 
-STRIP_TOP = TOP + 6
-STATUS_TOP = WINDOW[1] - 26
+def px(points):
+    """Points -> pixels. A point is UI pixels: 1.5 on a 4K screen, as at
+    Windows' 150%, so the text comes out the size the rest of the screen's
+    is."""
+    return int(round(points * UI))
 
-# The cameras' pictures along the bottom, then the log panel, bottom right,
-# with the height box at the top of it.
-FEED = (600, 375)
-LOG_LEFT = 16 + 2 * FEED[0] + 10
-HEIGHT_BOX_TOP = STRIP_TOP + 24
-HEIGHT_BOX_HEIGHT = 131
+
+def layout(size, ui=1.0):
+    """Lay the window out for `size` pixels, `ui` pixels to a point.
+
+    Three panels across the top: the 3D view, the 2D map, the 3D replica.
+    Along the bottom, the cameras' pictures at their own 16:10, then the log
+    panel with the height box at the top of it; the status line under all.
+    """
+    global UI, WINDOW, PANEL, TOP, MAP_X, REPLICA_X, STRIP_TOP, STATUS_TOP
+    global FEED, LOG_LEFT, HEIGHT_BOX_TOP, HEIGHT_BOX_HEIGHT
+
+    UI, WINDOW = float(ui), (int(size[0]), int(size[1]))
+    width, height = WINDOW
+
+    PANEL = width // 3
+    TOP = int(height * 0.555)
+    MAP_X, REPLICA_X = PANEL, 2 * PANEL
+
+    STRIP_TOP = TOP + px(6)
+    STATUS_TOP = height - px(26)
+
+    # As big as the strip is tall, leaving the log at least 560 points.
+    feed_height = STATUS_TOP - px(8) - (STRIP_TOP + px(22))
+    feed_width = min(feed_height * 1.6, (width - px(24) - px(560)) / 2.0)
+    FEED = (int(feed_width), int(feed_width / 1.6))
+    LOG_LEFT = px(16) + 2 * FEED[0] + px(10)
+    HEIGHT_BOX_TOP = STRIP_TOP + px(24)
+    HEIGHT_BOX_HEIGHT = px(131)
+
+
+layout(WINDOW)
 
 # A 30 cm drone, not a walking adult. Slower, because the tracker matches
 # features BETWEEN frames: at 1 m/s and 10 frames a second it moves 10 cm,
@@ -172,7 +198,46 @@ def parse_arguments():
     parser.add_argument("--roam", action="store_true",
                         help="start roaming straight away, to build a map without a driver")
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--replica", choices=["live", "later"], default=None,
+                        help="build the 3D replica as it goes, or only on B / at the end (default: brain.json)")
+    parser.add_argument("--ui", type=float, default=None,
+                        help="pixels per point, to make everything bigger or smaller (default: from the screen)")
+    parser.add_argument("--profile", action="store_true",
+                        help="print where the window's and the brain's time goes, every 10 s")
     return parser.parse_args()
+
+
+class Stopwatch:
+    """Where the window's time goes: milliseconds per loop for each part,
+    over the last stretch. One thread does the sim, the drawing and all, so
+    whatever is slow here slows the whole simulation."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.parts, self.loops, self.started = {}, 0, time.monotonic()
+
+    @contextlib.contextmanager
+    def part(self, name):
+        start = time.perf_counter()
+
+        try:
+            yield
+        finally:
+            self.parts[name] = self.parts.get(name, 0.0) + time.perf_counter() - start
+
+    def rate(self):
+        return self.loops / max(time.monotonic() - self.started, 1e-6)
+
+    def report(self):
+        """One line, the slowest part first; then starts over."""
+        loops = max(self.loops, 1)
+        parts = sorted(self.parts.items(), key=lambda item: -item[1])
+        line = f"{self.rate():.1f} loops/s | " + "  ".join(
+            f"{name} {1000.0 * total / loops:.1f}" for name, total in parts)
+        self.reset()
+        return line + " (ms per loop)"
 
 
 # ---------------------------------------------------------------------
@@ -304,7 +369,8 @@ class DroneApp:
         self.settings = brain_config.load()
 
         print("Opening the house...")
-        self.world = World(stage="process", true_depth=(args.depth == "oracle"))
+        self.world = World(stage="process", true_depth=(args.depth == "oracle"),
+                           viewer_size=(PANEL, TOP))
         self.drone_config = self.world.config["drone"]
         self.rig = self.world.rig
         self.imu = Imu(seed=7)
@@ -337,6 +403,7 @@ class DroneApp:
                     "fresh": args.fresh,
                     "use_tilt": not args.no_tilt,
                     "map_localize": getattr(args, "map_localize", False),
+                    **({} if args.replica is None else {"replica_live": args.replica == "live"}),
                     # The lenses sit at the centre of the sphere, so this is
                     # the drone's radius -- and the brain scales every depth
                     # by it, so it is sent rather than assumed.
@@ -367,8 +434,13 @@ class DroneApp:
         self.show_truth = True
         self.show_rooms = True
         self.orbit = OrbitView()
+        self.painter = Painter()           # draws the replica on its own thread
+        self.watch = Stopwatch()
         self.replica_cut = "ceiling"   # a height, "ceiling", or None: all
         self._replica_shown = None     # (key, centres, colours) last drawn
+        self._map_cache = None         # (state, what is shown, the layers, when)
+        self._replica_picture = None   # (cubes picture, scaled to the panel)
+        self._blits = {}               # place -> (image, size, scaled surface)
         self._dragging = None
         self.free_camera = False
         self.autopilot = False
@@ -489,50 +561,46 @@ class DroneApp:
     # Main loop
     # -----------------------------------------------------------------
 
-    def run(self):
-        if self.args.headless:
-            os.environ["SDL_VIDEODRIVER"] = "dummy"
-
-        pygame.init()
-
-        # Everything is drawn on `screen`, WINDOW-sized, and shown scaled in
-        # `display`, which opens as big as fits the screen and can be resized.
-        if self.args.headless:
-            size = WINDOW
-        else:
-            info = pygame.display.Info()
-            fit = min(1.0, 0.95 * info.current_w / WINDOW[0], 0.90 * info.current_h / WINDOW[1])
-            size = (int(WINDOW[0] * fit), int(WINDOW[1] * fit))
-
-        self.display = pygame.display.set_mode(size, pygame.RESIZABLE)
+    def run(self, display):
+        self.display = display
         self.screen = pygame.Surface(WINDOW)
         pygame.display.set_caption(f"DELTA | {self.world.scene_id}")
         pygame.key.set_repeat(400, 40)
-        self.font = pygame.font.SysFont("DejaVu Sans", 15)
-        self.small = pygame.font.SysFont("DejaVu Sans", 12)
-        self.big = pygame.font.SysFont("DejaVu Sans", 18, bold=True)
+        self.font = pygame.font.SysFont("DejaVu Sans", px(15))
+        self.small = pygame.font.SysFont("DejaVu Sans", px(12))
+        self.big = pygame.font.SysFont("DejaVu Sans", px(18), bold=True)
 
-        timer = pygame.time.Clock()
+        timer = self.timer = pygame.time.Clock()
 
         while self.running:
             # At most a tenth of a second per step: when the sim stalls (the GPU
             # busy with depth), time slows rather than the wearer teleporting a
             # metre between two camera frames -- which no real camera sees.
-            dt = min(timer.tick(30) / 1000.0, 0.1)
+            with self.watch.part("waiting"):
+                dt = min(timer.tick(30) / 1000.0, 0.1)
             self.clock += dt
+            self.watch.loops += 1
 
-            self._events()
-            self._move(dt)
+            with self.watch.part("input"):
+                self._events()
+            with self.watch.part("physics"):
+                self._move(dt)
 
             if self.script is not None:
-                self.script.step(dt)
+                with self.watch.part("script"):
+                    self.script.step(dt)
 
             if self.clock >= self.next_frame:
-                self._send_frame()
+                with self.watch.part("cameras"):
+                    self._send_frame()
                 self.next_frame = self.clock + 1.0 / self.frame_rate
 
-            self._drain_brain()
+            with self.watch.part("brain in"):
+                self._drain_brain()
             self._draw()
+
+            if self.args.profile and time.monotonic() - self.watch.started >= 10.0:
+                self._print_profile()
 
             if self.clock >= self.next_screenshot:
                 self.screenshot()
@@ -572,7 +640,7 @@ class DroneApp:
 
             elif event.type == pygame.MOUSEMOTION and getattr(self, "_dragging", None):
                 position = self._logical(event.pos)
-                self.orbit.drag(position[0] - self._dragging[0], position[1] - self._dragging[1])
+                self.orbit.drag((position[0] - self._dragging[0]) / UI, (position[1] - self._dragging[1]) / UI)
                 self._dragging = position
 
             elif event.type == pygame.MOUSEWHEEL:
@@ -638,6 +706,8 @@ class DroneApp:
                 self.note("Replica: the ceiling taken off.")
             else:
                 self.note(f"Replica: cut flat at {self.replica_cut:.1f} m.")
+        elif key == pygame.K_b:
+            self.command("build_replica", "Build the 3D replica from everything seen so far.")
         elif key == pygame.K_o and not self.free_camera:
             self.world.drone.pitch = 0.0
             self.note("Cameras level.")
@@ -1062,25 +1132,39 @@ class DroneApp:
         screen = self.screen
         screen.fill((14, 16, 20))
 
-        self._draw_viewer()
-        self._draw_map()
-        self._draw_replica()
-        self._draw_feeds()
-        self._draw_transcript()
-        self._draw_status()
+        with self.watch.part("3D view"):
+            self._draw_viewer()
+        with self.watch.part("map"):
+            self._draw_map()
+        with self.watch.part("replica"):
+            self._draw_replica()
+        with self.watch.part("feeds"):
+            self._draw_feeds()
+        with self.watch.part("text"):
+            self._draw_transcript()
+            self._draw_status()
 
         for x in (MAP_X, REPLICA_X):
-            pygame.draw.line(screen, (60, 64, 72), (x, 0), (x, TOP), 2)
+            pygame.draw.line(screen, (60, 64, 72), (x, 0), (x, TOP), px(2))
 
-        pygame.draw.line(screen, (60, 64, 72), (0, TOP), (WINDOW[0], TOP), 2)
+        pygame.draw.line(screen, (60, 64, 72), (0, TOP), (WINDOW[0], TOP), px(2))
 
         # The drawing, scaled to the window as it is now.
-        if self.display.get_size() == WINDOW:
-            self.display.blit(screen, (0, 0))
-        else:
-            self.display.blit(pygame.transform.smoothscale(screen, self.display.get_size()), (0, 0))
+        with self.watch.part("show"):
+            if self.display.get_size() == WINDOW:
+                self.display.blit(screen, (0, 0))
+            else:
+                self.display.blit(pygame.transform.smoothscale(screen, self.display.get_size()), (0, 0))
 
-        pygame.display.flip()
+            pygame.display.flip()
+
+    def _print_profile(self):
+        """The window's parts, and the brain's own, to stdout."""
+        print(f"[profile] window {self.watch.report()}", flush=True)
+        stats = (self.brain.state or {}).get("stats", {}) if self.brain else {}
+
+        if stats:
+            print(f"[profile] brain rates {stats.get('rates')} ms {stats.get('ms')}", flush=True)
 
     def _draw_replica(self):
         """The brain's 3D replica, in its own frame, orbiting the drone.
@@ -1111,22 +1195,49 @@ class DroneApp:
                 markers.append(((c * dx - s * dy, s * dx + c * dy, float(here.y) - self.floor_height),
                                 (80, 220, 110), 7))
 
+        # The cubes are drawn at one pixel a point, on the painter's own
+        # thread, and only when they or the view changed; the newest picture
+        # finished is scaled up to the panel, once per picture.
+        size = (int(PANEL / UI), int(TOP / UI))
+
         if replica is not None:
             centres, colour = self._replica_to_draw(replica)
-            image = self.orbit.render(centres, colour, (PANEL, TOP), float(replica[2]["voxel"]),
-                                      markers, version=(id(replica), self.replica_cut))
+            self.painter.ask(self.orbit, centres, colour, size, float(replica[2]["voxel"]),
+                             version=(id(replica), self.replica_cut))
         else:
-            image = self.orbit.render(np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint8),
-                                      (PANEL, TOP), markers=markers, version=None)
+            self.painter.ask(self.orbit, np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint8),
+                             size, version=None)
 
-        surface = pygame.surfarray.make_surface(np.transpose(image, (1, 0, 2)))
-        self.screen.blit(surface, (REPLICA_X, 0))
+        # (Before the first is done, a blank one.)
+        picture = self.painter.latest() or (self.orbit, np.zeros((size[1], size[0], 3), np.uint8))
 
-        self._text("3D replica", (REPLICA_X + 12, 10), self.big, (240, 240, 240))
-        count = f"{len(replica[0]):,} cubes from {replica[2].get('views', 0)} views   " if replica else "nothing yet   "
+        if self._replica_picture is None or self._replica_picture[0] is not picture[1]:
+            surface = pygame.surfarray.make_surface(np.transpose(picture[1], (1, 0, 2)))
+            self._replica_picture = (picture[1], pygame.transform.smoothscale(surface, (PANEL, TOP)))
+
+        self.screen.blit(self._replica_picture[1], (REPLICA_X, 0))
+
+        # The marks with the camera the picture was drawn from, so they sit
+        # where the picture has the drone even while it is a moment old.
+        for xyz, rgb, radius in markers:
+            point = picture[0].project(xyz, size)
+
+            if point is not None:
+                pygame.draw.circle(self.screen, rgb, (REPLICA_X + point[0] * UI, point[1] * UI),
+                                   px(radius), px(2))
+
+        self._text("3D replica", (REPLICA_X + px(12), px(10)), self.big, (240, 240, 240))
+        live = ((state or {}).get("stats", {}).get("replica") or {"live": True})
+
+        if replica:
+            count = f"{len(replica[0]):,} cubes from {replica[2].get('views', 0)} views   "
+        elif not live["live"]:
+            count = f"not built: {live.get('views', 0)} views kept, B builds it   "
+        else:
+            count = "nothing yet   "
         self._text(count + "drag: turn   scroll: zoom   F: "
                    + ("following the drone" if self.orbit.follow else "fixed"),
-                   (REPLICA_X + 12, 34), self.small, (170, 175, 185))
+                   (REPLICA_X + px(12), px(34)), self.small, (170, 175, 185))
 
         # What the brain knows of the ceiling, and what the view hides.
         ceiling = self._typical_ceiling()
@@ -1139,7 +1250,7 @@ class DroneApp:
             shown = f"cut flat at {self.replica_cut:.1f} m"
 
         self._text(f"{known}   view: {shown}   [ ]: lower / raise",
-                   (REPLICA_X + 12, 54), self.small, (190, 170, 120))
+                   (REPLICA_X + px(12), px(52)), self.small, (190, 170, 120))
 
     def _replica_to_draw(self, replica):
         """The cubes the panel draws: all of them, less the ceiling or what
@@ -1329,11 +1440,15 @@ class DroneApp:
 
         self._outline_drone()
         image = self.world.observe_viewer()
-        surface = pygame.surfarray.make_surface(np.transpose(image, (1, 0, 2)))
-        self.screen.blit(pygame.transform.smoothscale(surface, (PANEL, TOP)), (0, 0))
+        surface = pygame.surfarray.make_surface(np.transpose(image[:, :, :3], (1, 0, 2)))
+
+        if surface.get_size() != (PANEL, TOP):
+            surface = pygame.transform.smoothscale(surface, (PANEL, TOP))
+
+        self.screen.blit(surface, (0, 0))
 
         label = "Free camera (WASD, IJKL, Z/X) - V to follow" if self.free_camera else "Behind you - V for free camera"
-        self._text(label, (12, 10), self.big, (240, 240, 240))
+        self._text(label, (px(12), px(10)), self.big, (240, 240, 240))
 
     def _panel_affine(self, layer):
         """Cell (col, row) of a brain layer -> brain world -> true world ->
@@ -1352,26 +1467,45 @@ class DroneApp:
         return affine
 
     def _draw_map(self):
+        state = self.brain.state if self.brain else None
+        arrays = self.brain.state_arrays if self.brain else {}
+
+        # The layers are drawn again only when the brain has sent a new
+        # state (a few times a second) or a key changed what is shown, not
+        # on every frame; the marks over them are drawn every frame.
+        shown = (self.show_truth, self.show_rooms, self.alignment.ready)
+        cached = self._map_cache
+
+        # At most 4 times a second, though: at 4K a redraw is ~20 ms, and
+        # the map grows slowly -- the drone's mark moves every frame anyway.
+        stale = cached is None or (cached[0] is not state and time.monotonic() - cached[3] >= 0.25)
+
+        if stale or cached[1] != shown:
+            if state:
+                self._widen_view_for(state, arrays)
+
+            canvas = self._map_layers(state, arrays)
+            cached = self._map_cache = (state, shown, pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2))),
+                                        time.monotonic())
+
+        self.screen.blit(cached[2], (MAP_X, 0))
+        self._map_marks(state)
+
+    def _map_layers(self, state, arrays):
+        """The map panel's picture: the true layout, the brain's map, its
+        rooms."""
         canvas = np.zeros((TOP, PANEL, 3), np.uint8)
         canvas[:] = (20, 23, 28)
 
         if self.show_truth:
-            truth = cv2.warpAffine(self.truth_layer, self.truth_affine, (PANEL, TOP), flags=cv2.INTER_NEAREST)
-            canvas = np.maximum(canvas, truth)
+            # The true layout never changes; only the panel's scale does.
+            view = self.truth_affine.tobytes()
 
-        state = self.brain.state if self.brain else None
-        arrays = self.brain.state_arrays if self.brain else {}
+            if getattr(self, "_truth_warped", (None,))[0] != view:
+                self._truth_warped = (view, cv2.warpAffine(self.truth_layer, self.truth_affine, (PANEL, TOP),
+                                                           flags=cv2.INTER_NEAREST))
 
-        if state:
-            self._widen_view_for(state, arrays)
-
-            if self.show_truth:
-                # The view may have just grown, so the truth has to be
-                # redrawn at the new scale rather than the one above.
-                canvas[:] = (20, 23, 28)
-                truth = cv2.warpAffine(self.truth_layer, self.truth_affine,
-                                       (PANEL, TOP), flags=cv2.INTER_NEAREST)
-                canvas = np.maximum(canvas, truth)
+            canvas = np.maximum(canvas, self._truth_warped[1])
 
         if state and "grid" in state and "grid" in arrays and self.alignment.ready:
             grid = arrays["grid"]
@@ -1405,16 +1539,18 @@ class DroneApp:
             palette = np.array([(0, 0, 0)] + ROOM_COLOURS * 26, np.float32)[:256]
             canvas[tinted] = (0.55 * canvas[tinted] + 0.45 * palette[warped[tinted]]).astype(np.uint8)
 
-        surface = pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2)))
-        self.screen.blit(surface, (MAP_X, 0))
+        return canvas
 
+    def _map_marks(self, state):
+        """What is drawn over the map panel every frame: the drone, the
+        route, the names, and the panel's own text."""
         offset = np.array([MAP_X, 0])
 
         if state and self.alignment.ready:
             for place in state.get("places", []):
                 p = np.array(self.to_panel(self.alignment.point(place["xy"]))) + offset
-                pygame.draw.polygon(self.screen, PLACE_COLOUR, _star(p, 9))
-                self._text(place["name"], p + (10, -8), self.small, PLACE_COLOUR)
+                pygame.draw.polygon(self.screen, PLACE_COLOUR, _star(p, px(9)))
+                self._text(place["name"], p + (px(10), -px(8)), self.small, PLACE_COLOUR)
 
             # Only trusted things, and names only for the well seen: a walk
             # through a house glimpses a great deal.
@@ -1423,70 +1559,70 @@ class DroneApp:
                     continue
 
                 p = np.array(self.to_panel(self.alignment.point(thing["xy"]))) + offset
-                pygame.draw.circle(self.screen, THING_COLOUR, p, 4)
+                pygame.draw.circle(self.screen, THING_COLOUR, p, px(4))
 
                 if thing["seen"] >= 6:
-                    self._text(thing["id"], p + (6, -7), self.small, THING_COLOUR)
+                    self._text(thing["id"], p + (px(6), -px(7)), self.small, THING_COLOUR)
 
             if "route" in state:
                 points = [np.array(self.to_panel(self.alignment.point(xy))) + offset
                           for xy in state["route"]["points"]]
 
                 if len(points) >= 2:
-                    pygame.draw.lines(self.screen, ROUTE_COLOUR, False, points, 3)
+                    pygame.draw.lines(self.screen, ROUTE_COLOUR, False, points, px(3))
 
                 target = np.array(self.to_panel(self.alignment.point(state["route"]["target"]))) + offset
-                pygame.draw.circle(self.screen, TARGET_COLOUR, target, 8, 2)
+                pygame.draw.circle(self.screen, TARGET_COLOUR, target, px(8), px(2))
 
             if self.show_rooms and "rooms" in state:
                 for door in state["rooms"]["doors"]:
                     p = np.array(self.to_panel(self.alignment.point(door["xy"]))) + offset
-                    pygame.draw.circle(self.screen, DOOR_COLOUR, p, 4)
+                    pygame.draw.circle(self.screen, DOOR_COLOUR, p, px(4))
 
                 for room in state["rooms"]["list"]:
                     p = np.array(self.to_panel(self.alignment.point(room["xy"]))) + offset
                     self._text(f"room {room['id']}  {room['area']:.0f} m2",
-                               p - (30, 7), self.small, (250, 250, 250))
+                               p - (px(30), px(7)), self.small, (250, 250, 250))
 
             if "pose" in state:
                 pose = state["pose"]
                 p = np.array(self.to_panel(self.alignment.point((pose["x"], pose["y"])))) + offset
                 heading = pose["yaw"] + self.alignment.yaw
-                tip = p + 16 * np.array([math.cos(heading), -math.sin(heading)])
-                pygame.draw.line(self.screen, DRONE_BELIEVED, p, tip, 3)
-                pygame.draw.circle(self.screen, DRONE_BELIEVED, p, 6)
+                tip = p + px(16) * np.array([math.cos(heading), -math.sin(heading)])
+                pygame.draw.line(self.screen, DRONE_BELIEVED, p, tip, px(3))
+                pygame.draw.circle(self.screen, DRONE_BELIEVED, p, px(6))
 
         # Where the wearer really is.
         lens = self.truth_by_frame.get(self.frame_id - 1)
 
         if lens is not None:
             p = np.array(self.to_panel(lens[:2])) + offset
-            tip = p + 16 * np.array([math.cos(lens[2]), -math.sin(lens[2])])
-            pygame.draw.circle(self.screen, DRONE_TRUE, p, 7, 2)
-            pygame.draw.line(self.screen, DRONE_TRUE, p, tip, 2)
+            tip = p + px(16) * np.array([math.cos(lens[2]), -math.sin(lens[2])])
+            pygame.draw.circle(self.screen, DRONE_TRUE, p, px(7), px(2))
+            pygame.draw.line(self.screen, DRONE_TRUE, p, tip, px(2))
 
-        self._text("What the drone believes", (MAP_X + 12, 10), self.big, (240, 240, 240))
+        self._text("What the drone believes", (MAP_X + px(12), px(10)), self.big, (240, 240, 240))
         self._text("green: really here   orange: believed here   white: occupied   lilac: can roll under",
-                   (MAP_X + 12, 34), self.small, (170, 175, 185))
+                   (MAP_X + px(12), px(34)), self.small, (170, 175, 185))
         self._text("M: true layout " + ("on" if self.show_truth else "off")
                    + "   N: rooms " + ("on" if self.show_rooms else "off") + "   click: plan a route",
-                   (MAP_X + 12, 50), self.small, (170, 175, 185))
+                   (MAP_X + px(12), px(50)), self.small, (170, 175, 185))
 
         silent = time.monotonic() - self.brain.state_at if self.brain is not None and self.brain.state_at else 0.0
 
         if self.brain is None:
-            self._text("Running without a brain (--no-brain)", (MAP_X + 12, 70), self.font, (200, 120, 120))
+            self._text("Running without a brain (--no-brain)", (MAP_X + px(12), px(70)), self.font, (200, 120, 120))
         elif not self.brain.connected:
             message = (f"The brain stopped ({self.brain.error}). Close this window and see outputs/logs/brain.log."
                        if self.brain.error else "Waiting for the brain to start...")
-            self._text(message, (MAP_X + 12, 70), self.font, (240, 120, 90))
+            self._text(message, (MAP_X + px(12), px(70)), self.font, (240, 120, 90))
         elif not self.brain.ready:
-            self._text("Brain loading models...", (MAP_X + 12, 70), self.font, (220, 180, 90))
+            self._text("Brain loading models...", (MAP_X + px(12), px(70)), self.font, (220, 180, 90))
         elif silent > 3.0:
             # Connected but quiet: the brain is stuck or one of its threads
             # died. Its position and map on screen are frozen, not live.
             self._text(f"The brain has not answered for {silent:.0f} s -- what you see is frozen. "
-                       "See outputs/logs/brain.log.", (MAP_X + 12, 70), self.font, (240, 120, 90))
+                       "See outputs/logs/brain.log.", (MAP_X + px(12), px(70)), self.font, (240, 120, 90))
 
     def _draw_feeds(self):
         """The left lens, and the depth the brain made of it.
@@ -1504,12 +1640,12 @@ class DroneApp:
 
         width, height = FEED
 
-        self._blit(self.last_glasses["left"], (8, STRIP_TOP + 22), (width, height))
-        self._text("Left lens", (8, STRIP_TOP + 2), self.font, (210, 210, 210))
+        self._blit(self.last_glasses["left"], (px(8), STRIP_TOP + px(22)), (width, height))
+        self._text("Left lens", (px(8), STRIP_TOP + px(2)), self.font, (210, 210, 210))
 
         if "depth" in arrays:
-            depth = cv2.applyColorMap(255 - arrays["depth"], cv2.COLORMAP_VIRIDIS)[:, :, ::-1]
-            self._blit(depth, (16 + width, STRIP_TOP + 22), (width, height))
+            self._blit(arrays["depth"], (px(16) + width, STRIP_TOP + px(22)), (width, height),
+                       colour=lambda d: cv2.applyColorMap(255 - d, cv2.COLORMAP_VIRIDIS)[:, :, ::-1])
 
             scale = (state or {}).get("stats", {}).get("floor_scale")
             label = "Depth the brain is using (0-6 m)"
@@ -1517,11 +1653,11 @@ class DroneApp:
             if scale:
                 label += f"   floor scale x{scale:.2f}"
 
-            self._text(label, (16 + width, STRIP_TOP + 2), self.font, (210, 210, 210))
+            self._text(label, (px(16) + width, STRIP_TOP + px(2)), self.font, (210, 210, 210))
 
     def _draw_transcript(self):
-        x, top, bottom = LOG_LEFT, STRIP_TOP + 2, STATUS_TOP - 30
-        width = WINDOW[0] - x - 8
+        x, top, bottom = LOG_LEFT, STRIP_TOP + px(2), STATUS_TOP - px(30)
+        width = WINDOW[0] - x - px(8)
 
         self._text("Log", (x, top), self.font, (210, 210, 210))
 
@@ -1531,22 +1667,22 @@ class DroneApp:
             for line in _wrap(text, self.small, width):
                 lines.append((kind, line))
 
-        y = bottom - 16
+        y = bottom - px(16)
 
         for kind, line in reversed(lines):
             # Stop under the height box.
-            if y < HEIGHT_BOX_TOP + HEIGHT_BOX_HEIGHT + 6:
+            if y < HEIGHT_BOX_TOP + HEIGHT_BOX_HEIGHT + px(6):
                 break
 
             self._text(line, (x, y), self.small, KIND_COLOURS.get(kind, (200, 200, 200)))
-            y -= 16
+            y -= px(16)
 
-        box = pygame.Rect(x, STATUS_TOP - 26, width, 22)
+        box = pygame.Rect(x, STATUS_TOP - px(26), width, px(22))
         pygame.draw.rect(self.screen, (26, 28, 34), box)
         self._text(
             "arrows drive   1/0 fly, land   I/K tilt   click map: plan   C: clear   "
-            "G: autopilot   R: roam   Tab: save",
-            (x + 4, box.y + 4), self.small, (130, 135, 145),
+            "G: autopilot   R: roam   B: build 3D   Tab: save",
+            (x + px(4), box.y + px(4)), self.small, (130, 135, 145),
         )
 
     def _draw_status(self):
@@ -1565,7 +1701,7 @@ class DroneApp:
             else:
                 text = "Brain connected, loading models..."
 
-            self._text(text, (8, STATUS_TOP + 5), self.small, (255, 180, 90))
+            self._text(text, (px(8), STATUS_TOP + px(5)), self.small, (255, 180, 90))
             return
 
         stats = state.get("stats", {})
@@ -1575,6 +1711,7 @@ class DroneApp:
         sources = stats.get("sources", {})
 
         parts = [
+            f"window {self.timer.get_fps():.0f} fps",
             f"pose {sources.get('pose')}  depth {sources.get('depth')}",
             f"frames {rates.get('frames', 0):.0f}/s  perception {rates.get('perception', 0):.1f}/s "
             f"(DA3 {ms.get('depth', 0)} ms, map {ms.get('map', 0)} ms)",
@@ -1594,7 +1731,7 @@ class DroneApp:
         if stats.get("relocalizing"):
             parts.append("RECOGNISING LAST SESSION'S MAP...")
 
-        self._text("   |   ".join(parts), (8, STATUS_TOP + 5), self.small, (175, 180, 190))
+        self._text("   |   ".join(parts), (px(8), STATUS_TOP + px(5)), self.small, (175, 180, 190))
 
     def _draw_height(self, stats):
         """Two heights, the brain's next to the truth, on the 3D view:
@@ -1630,18 +1767,18 @@ class DroneApp:
 
         # At the top of the log panel, clear of the 3D view.
         x, top = LOG_LEFT, HEIGHT_BOX_TOP
-        pygame.draw.rect(self.screen, (24, 26, 32), pygame.Rect(x, top, 380, HEIGHT_BOX_HEIGHT))
+        pygame.draw.rect(self.screen, (24, 26, 32), pygame.Rect(x, top, px(380), HEIGHT_BOX_HEIGHT))
 
         for i, (name, brain, truth) in enumerate(rows):
-            y = top + 4 + i * 21
+            y = top + px(4) + i * px(21)
             colour = (150, 155, 165) if i == 0 else (235, 235, 235)
-            self._text(name, (x + 8, y), self.font, colour)
-            self._text(brain, (x + 222, y), self.font, (120, 200, 255) if i else colour)
-            self._text(truth, (x + 302, y), self.font, (160, 220, 160) if i else colour)
+            self._text(name, (x + px(8), y), self.font, colour)
+            self._text(brain, (x + px(222), y), self.font, (120, 200, 255) if i else colour)
+            self._text(truth, (x + px(302), y), self.font, (160, 220, 160) if i else colour)
 
         pitch = self.world.drone.pitch
         tilt = "level" if abs(pitch) < 0.5 else f"{abs(pitch):.0f} deg {'down' if pitch > 0 else 'up'}"
-        self._text(f"cameras: {tilt}   (I up, K down, O level)", (x + 8, top + 4 + len(rows) * 21),
+        self._text(f"cameras: {tilt}   (I up, K down, O level)", (x + px(8), top + px(4) + len(rows) * px(21)),
                    self.small, (190, 170, 120))
 
     def _true_rooms(self):
@@ -1887,9 +2024,19 @@ class DroneApp:
 
     # -----------------------------------------------------------------
 
-    def _blit(self, image, position, size):
-        surface = pygame.surfarray.make_surface(np.transpose(np.ascontiguousarray(image[:, :, :3]), (1, 0, 2)))
-        self.screen.blit(pygame.transform.smoothscale(surface, size), position)
+    def _blit(self, image, position, size, colour=None):
+        """A picture, scaled to `size` -- once per new picture: the window
+        runs 30 times a second, a camera picture is new 10 times, and
+        scaling one to these sizes takes milliseconds. `colour` turns
+        `image` into RGB first (a depth map into colours)."""
+        cached = self._blits.get(position)
+
+        if cached is None or cached[0] is not image or cached[1] != size:
+            rgb = image if colour is None else colour(image)
+            surface = pygame.surfarray.make_surface(np.transpose(np.ascontiguousarray(rgb[:, :, :3]), (1, 0, 2)))
+            cached = self._blits[position] = (image, size, pygame.transform.smoothscale(surface, size))
+
+        self.screen.blit(cached[2], position)
 
     def _text(self, text, position, font, colour):
         self.screen.blit(font.render(text, True, colour), (int(position[0]), int(position[1])))
@@ -2303,6 +2450,8 @@ class Script:
         {"score": "name"}                   score the live map (outputs/eval/)
         {"score_rooms": "name"}             score the brain's rooms against
                                             HSSD's room outlines
+        {"build_replica": true}             build the 3D replica now (when it
+                                            is not built as the drone goes)
         {"score_replica": "name"}           score the brain's 3D replica against
                                             the real house (true depth)
         {"plan_ahead": 3}                   plan a route to the spot 3 m ahead,
@@ -2368,6 +2517,9 @@ class Script:
             self._done = True
         elif "score_rooms" in step:
             app.score_rooms(step["score_rooms"])
+            self._done = True
+        elif "build_replica" in step:
+            app.command("build_replica", "Build the 3D replica.")
             self._done = True
         elif "score_replica" in step:
             app.score_replica(step["score_replica"])
@@ -2540,7 +2692,46 @@ def main():
     if args.headless:
         os.environ["SDL_VIDEODRIVER"] = "dummy"
 
-    DroneApp(args).run()
+    display = open_window(args)
+    DroneApp(args).run(display)
+
+
+def open_window(args):
+    """The window, maximised, and the layout for its size.
+
+    Opened before the house is loaded, because the layout decides how big
+    Habitat renders the view behind the drone. A point is 1.5 pixels on a
+    4K screen (2560 points across, as Windows at 150%), 1 on anything up to
+    2560 wide; --ui overrides it.
+    """
+    pygame.init()
+
+    if args.headless:
+        layout(WINDOW)
+        return pygame.display.set_mode(WINDOW)
+
+    desktop = pygame.display.get_desktop_sizes()[0]
+    ui = args.ui or max(1.0, round(desktop[0] / 2560.0 * 4.0) / 4.0)
+    display = pygame.display.set_mode((desktop[0] * 3 // 4, desktop[1] * 3 // 4), pygame.RESIZABLE)
+
+    try:
+        from pygame._sdl2 import video
+        video.Window.from_display_module().maximize()
+    except Exception as error:                     # an old pygame: stay unmaximised
+        print(f"Could not maximise the window: {error!r}")
+
+    # The window manager answers with the new size a moment later.
+    first = display.get_size()
+    deadline = time.monotonic() + 2.0
+
+    while time.monotonic() < deadline and pygame.display.get_window_size() == first:
+        pygame.event.pump()
+        time.sleep(0.05)
+
+    size = pygame.display.get_window_size()
+    layout(size, ui)
+    print(f"Window {size[0]} x {size[1]} pixels, {ui:g} pixels a point.")
+    return pygame.display.set_mode(size, pygame.RESIZABLE)
 
 
 if __name__ == "__main__":

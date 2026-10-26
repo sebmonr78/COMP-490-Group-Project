@@ -96,20 +96,20 @@ def make_view(depth, K, rgb, lens_height, settings, anchor=0, anchor_from_base=N
     # it: the floor right in front of the camera is hit by thousands of
     # pixels a few millimetres apart, and keeping them all made two minutes
     # of driving 69 MB of views.
+    # (One packed key per cell and bincount sums: a 3-column np.unique and
+    # np.add.at took 100 ms a view, on the perception thread.)
     thin = float(settings.get("thin", 0.025)) if hasattr(settings, "get") else 0.025
-    _, inverse, counts = np.unique(np.floor(points / thin).astype(np.int64), axis=0,
+    _, inverse, counts = np.unique(_pack(np.floor(points / thin).astype(np.int64)),
                                    return_inverse=True, return_counts=True)
     inverse = inverse.reshape(-1)
-    mean_points = np.zeros((len(counts), 3), np.float64)
-    mean_colours = np.zeros((len(counts), 3), np.float64)
-    np.add.at(mean_points, inverse, points)
-    np.add.at(mean_colours, inverse, colours)
+    mean_points = _sums(inverse, points, len(counts)) / counts[:, None]
+    mean_colours = _sums(inverse, colours, len(counts)) / counts[:, None]
 
     return View(
         anchor=anchor,
         anchor_from_base=np.eye(4) if anchor_from_base is None else anchor_from_base,
-        points=(mean_points / counts[:, None]).astype(np.float16),
-        colours=np.clip(mean_colours / counts[:, None], 0, 255).astype(np.uint8),
+        points=mean_points.astype(np.float16),
+        colours=np.clip(mean_colours, 0, 255).astype(np.uint8),
     )
 
 
@@ -185,8 +185,7 @@ class Replica:
 
         keys = _pack(np.floor(world / self.voxel).astype(np.int64))
         unique, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
-        colour = np.zeros((len(unique), 3), np.int64)
-        np.add.at(colour, inverse, view.colours.astype(np.int64))
+        colour = _sums(inverse.reshape(-1), view.colours, len(unique)).round().astype(np.int64)
 
         slots = np.empty(len(unique), np.int64)
 
@@ -380,3 +379,9 @@ def _unpack(keys):
         ((keys >> BITS) & MASK) - OFFSET,
         (keys & MASK) - OFFSET,
     ], axis=1)
+
+
+def _sums(groups, values, count):
+    """Per group, the sum of each column of `values` (N x 3): np.add.at's
+    answer, from bincount, many times faster."""
+    return np.stack([np.bincount(groups, weights=values[:, i], minlength=count) for i in range(3)], axis=1)

@@ -151,6 +151,9 @@ class Brain:
 
         self.use_tilt = bool(hello.get("use_tilt", True))
         self.map_localize = bool(hello.get("map_localize", False))
+        # Build the replica as it goes, or only when asked (brain.json, or
+        # the window's --replica).
+        self.replica_live = bool(hello.get("replica_live", settings.replica.live))
         self.corrector = None
 
         self.memory_dir = (
@@ -292,6 +295,10 @@ class Brain:
         # The replica's views, to rebuild it from, and the replica itself as
         # a coloured point cloud any 3D viewer opens (MeshLab, CloudCompare).
         if self.replica.views:
+            # Not built as it went: built now, the task done.
+            if not self.replica_live:
+                self.replica.rebuild(dict(self.localizer.node_poses))
+
             self.replica.save(self.memory_dir / "replica.npz")
             self.replica.save_ply(self.memory_dir / "replica.ply")
 
@@ -406,6 +413,11 @@ class Brain:
         elif name == "save":
             self.save()
             self.status("Map saved.")
+        elif name == "build_replica":
+            # Every kept view at where the map now puts it -- a rebuild, on
+            # the replica's own thread; sent when done.
+            self._replica_jobs.put(("rebuild", None, dict(self.localizer.node_poses)))
+            self.status(f"Building the 3D replica from {len(self.replica.views)} views.")
 
     # -----------------------------------------------------------------
     # Where the drone is
@@ -497,7 +509,9 @@ class Brain:
             if self.grid is not None:
                 self.grid.rebuild(poses)
 
-        self._replica_jobs.put(("rebuild", None, poses))
+        # Built only when asked for, the replica is not redrawn either.
+        if self.replica_live:
+            self._replica_jobs.put(("rebuild", None, poses))
 
     def _build_replica(self):
         """The replica's own thread: add views as they come, rebuild after a
@@ -510,8 +524,13 @@ class Brain:
             except queue.Empty:
                 continue
 
-            if job == "add":
+            started = time.monotonic()
+
+            if job == "add" and not self.replica_live:
+                self.replica.keep(view)
+            elif job == "add":
                 self.replica.add(view, pose)
+                self.timing.update(replica_add=(time.monotonic() - started) * 1000.0)
             else:
                 while True:
                     try:
@@ -525,6 +544,7 @@ class Brain:
                         pose = newer[2]
 
                 self.replica.rebuild(pose)
+                self.timing.update(replica_rebuild=(time.monotonic() - started) * 1000.0)
 
     # -----------------------------------------------------------------
     # The perception loop
@@ -614,10 +634,12 @@ class Brain:
             # A view the map kept is a view for the replica too: its surface
             # points in colour, added by the replica's own thread.
             if len(self.grid.scans) > kept:
+                viewed = time.monotonic()
                 self._replica_jobs.put(("add", replica_module.make_view(
                     depth_map.depth, depth_map.K, pair.left, lens_height, self.settings.replica,
                     fix.anchor, fix.anchor_from_base, tilt=tilt,
                 ), pose))
+                self.timing.update(replica_view=(time.monotonic() - viewed) * 1000.0)
 
             self.timing.update(
                 depth=(measured - started) * 1000.0,
@@ -732,7 +754,7 @@ class Brain:
         if self.replica.version == self._replica_sent or time.monotonic() - self._replica_at < every:
             return
 
-        self._replica_at = time.monotonic()
+        started = self._replica_at = time.monotonic()
         self._replica_sent = self.replica.version
         centres, colours = self.replica.cloud()
         voxel = self.replica.voxel
@@ -753,6 +775,7 @@ class Brain:
             {"index": np.floor(centres / voxel).astype(np.int16), "colour": colours,
              "ceiling": self.ceiling.heights.astype(np.float16)},
         )
+        self.timing.update(replica_send=(time.monotonic() - started) * 1000.0)
 
     def _ceiling_here(self, pose):
         if self.ceiling is None or pose is None:
@@ -897,6 +920,7 @@ class Brain:
                 dict(self.corrector.stats) if self.corrector is not None else None
             ),
             "sources": {"pose": self.pose_source, "depth": self.depth_source},
+            "replica": {"live": self.replica_live, "views": len(self.replica.views)},
             "relocalizing": self.saved_root_map is not None,
         }
 
