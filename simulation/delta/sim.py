@@ -32,7 +32,11 @@ from delta import rig as rig_module
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "config" / "project.json"
 
-SPECTATOR, SENSORS = 0, 1
+SPECTATOR, SENSORS, SCORER = 0, 1, 2
+
+# The scoring camera's picture size: true depth, for judging the brain's 3D
+# replica after a drive (World.true_depth_at). Never the brain's.
+SCORER_SIZE = (320, 200)
 
 # A navmesh point with something within this many metres overhead counts
 # as being under a roof. Tall enough to clear a stairwell, short enough
@@ -176,8 +180,21 @@ def create_simulator(dataset_config, scene_file, rig,
         ground_truth_depth=true_depth,
     )
 
+    # A third camera, for the examiner only: true depth from wherever it is
+    # put, rendered only when asked (World.true_depth_at), never sent to the
+    # brain. It is how the brain's 3D replica is scored.
+    scorer = habitat_sim.agent.AgentConfiguration()
+    depth = habitat_sim.CameraSensorSpec()
+    depth.uuid = "scorer_depth"
+    depth.sensor_type = habitat_sim.SensorType.DEPTH
+    depth.sensor_subtype = habitat_sim.SensorSubType.PINHOLE
+    depth.resolution = [SCORER_SIZE[1], SCORER_SIZE[0]]
+    depth.position = [0.0, 0.0, 0.0]
+    depth.hfov = float(rig.camera(rig.stereo_pair[0]).hfov)
+    scorer.sensor_specifications = [depth]
+
     return habitat_sim.Simulator(
-        habitat_sim.Configuration(backend, [spectator, head])
+        habitat_sim.Configuration(backend, [spectator, head, scorer])
     )
 
 
@@ -808,6 +825,25 @@ class World:
             ).astype(np.float32)
 
         return result
+
+    def true_depth_at(self, position, rotation_wxyz):
+        """True planar depth from a camera at `position` facing `rotation`
+        (as observe_rig reports the left lens), and its intrinsics K. For
+        scoring only: this is the answer key, never the brain's input."""
+        node = self.simulator.agents[SCORER].scene_node
+        node.translation = mn.Vector3(*position)
+        w, x, y, z = rotation_wxyz
+        node.rotation = mn.Quaternion(mn.Vector3(x, y, z), w)
+
+        observations = self.simulator.get_sensor_observations(agent_ids=[SCORER])
+        observations = observations[SCORER] if SCORER in observations else observations
+        depth = np.squeeze(observations["scorer_depth"]).astype(np.float32)
+
+        width, height = SCORER_SIZE
+        focal = (width / 2.0) / math.tan(math.radians(self.rig.camera(self.rig.stereo_pair[0]).hfov) / 2.0)
+        K = np.array([[focal, 0.0, width / 2.0], [0.0, focal, height / 2.0], [0.0, 0.0, 1.0]])
+
+        return depth, K
 
     def observe_viewer(self):
         observations = self.simulator.get_sensor_observations(agent_ids=[SPECTATOR])

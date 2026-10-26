@@ -13,36 +13,43 @@ One at a time: finish it, measure it, try it by hand, then the next.
 | Height: down-facing rangefinder + flight controller's climb rate | 1–2 cm; table and stairs recognised as "something under me" |
 | Camera tilt (I/K/O), camera marker, height box | |
 | Rooms v1: the 2D map split at doors (indoor/outdoor taken out again: not needed) | by walls: 0.98 / 0.98 (true pose), 0.88 / 0.85 (RTAB-Map) |
+| Bigger house (102816036: 29 x 21 m, 36 rooms) | 7 rooms, 6 doors found on a first drive |
+| The map shows what is there: solid layer 0.08–1.8 m, white; lilac = roll under | edges found 0.62 / right 0.77 (true pose); 0.35 / 0.65 (RTAB-Map) |
+| **The 3D replica**: coloured 5 cm cubes from every view, rebuilt on loop closures; its own panel (drag, scroll, F); saved as a .ply; window 1920x1080, resizable | true pose: accuracy 2.2 cm, F-score 0.95 at 5 cm; RTAB-Map: 4.0 cm, F 0.63 |
 
-## Next
+## Next — the replica, one phase at a time
 
-### 1. 3D map — the replica of the place
-- **What:** a 3D map of 5 cm cubes (voxels), each coloured by what the camera
-  saw, built from depth at the brain's own position.
-- **Why:** there is no 3D map yet, only a 2D one at rolling height. Flying
-  needs to know what is at every height; the 2D map wrongly fills in floor it
-  never saw from the air (2.2% unsafe vs 0% rolling); and you want to see the
-  place.
-- **How:** every depth pixel is a ray: the cube it ends in gets "occupied",
-  every cube it passed through gets "free". Evidence adds up (log-odds) and
-  is capped, so a change can flip a cube in a few looks. Cubes hang off
-  RTAB-Map's nodes, so a loop closure moves them (as the 2D map does now).
-  The 2D rolling map, the floor plan and the rooms are then *cut from* the
-  3D map — one source of truth instead of three.
-- **Test** (true position and depth first, then real): share of cubes within
-  5 cm of a real surface (precision), share of seen surfaces that got a cube
-  (completeness); the 2D maps cut from it vs today's (fake obstacles,
-  unsafe); ground vs air unsafe.
-- **Connected to:** localization ✓ and height ✓ feed it; it feeds rooms,
-  obstacle stops, navigation and exploration.
+Measured on tests/scripts/replica.json with {"score_replica": ...}: true depth
+rendered from every place the lens looked from, against the brain's cubes.
+With the true position the replica is 0.95; with RTAB-Map's 0.63. So:
 
-### 2. Look around the replica
-- **What:** open the brain's 3D map and orbit it, next to the real house.
-- **Why:** to see, not just score, what the drone built.
-- **How:** the brain saves the coloured cubes; a viewer opens them (a 3D
-  window, or a web page you can share).
-- **Test:** side by side with the same view of the real house.
-- **Connected to:** 1.
+### A. Scan where you stand
+- **What:** a scan routine on one key (and a script step): turn 360° on the
+  ground with the cameras tilted up, fly up, turn 360° with them tilted
+  down, come back down. Your idea; it is what the inspection drones do at a
+  point of interest.
+- **Why:** rolling at 15 cm the cameras never see table tops, shelves or the
+  upper half of a room; from up high they never see under things.
+- **Test:** completeness of the replica before and after one scan at the
+  same spot; seconds and metres flown per scan.
+
+### B. Localization good enough for the replica
+- **What:** the 0.95 → 0.63 gap: walls drawn twice because the position
+  drifted 0.3–0.8 m between passes.
+- **How:** first the map check that is already in the brain (compare what
+  depth sees with the map, correct the position), measured on its own; then
+  RTAB-Map's own scan matching against depth.
+- **Test:** replica F-score and position error, with and without it.
+
+### C. Explore and scan on its own
+- **What:** go to the edge of the unexplored by the cheapest route, scan
+  there (A), repeat until nothing is left (frontier exploration; the
+  next-best-view work for 3D).
+- **Test:** % of the house's surfaces in the replica per minute and per
+  metre flown.
+
+### D. Real depth
+- Depth Anything instead of the true depth: every score above again.
 
 ### 3. When the house changes
 - **What:** the map notices a thing added (a fridge, a person) and a thing
