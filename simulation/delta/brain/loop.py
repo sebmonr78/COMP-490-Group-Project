@@ -28,6 +28,7 @@ One lock guards what the loops share: the grid and the route.
 
 import json
 import math
+import queue
 import shutil
 import threading
 import time
@@ -49,6 +50,7 @@ from delta.brain import (
     occupancy,
     planner,
     rectify,
+    replica as replica_module,
     rooms as rooms_module,
 )
 from delta.wire import Closed
@@ -166,6 +168,12 @@ class Brain:
         self._rooms = None
         self._rooms_at = 0.0
 
+        # The place in 3D and colour (replica.py), built on its own thread.
+        self.replica = replica_module.Replica(settings.replica)
+        self._replica_jobs = queue.Queue()
+        self._replica_sent = -1
+        self._replica_at = 0.0
+
         self.rates = {name: Rate() for name in ("frames", "perception")}
         self.timing = {}
         self.epoch = 0
@@ -265,6 +273,9 @@ class Brain:
             self.grid = occupancy.OccupancyGrid(self.settings.occupancy, (0.0, 0.0))
             self.grid.load(self.memory_dir / "grid.npz")
 
+        if (self.memory_dir / "replica.npz").exists():
+            self.replica.load(self.memory_dir / "replica.npz")
+
         # With RTAB-Map, what was saved is in LAST session's map frame. Until
         # RTAB-Map recognises somewhere from it, this session's poses are in a
         # different frame and must not be written into the old map.
@@ -277,6 +288,12 @@ class Brain:
         )
 
     def save(self):
+        # The replica's views, to rebuild it from, and the replica itself as
+        # a coloured point cloud any 3D viewer opens (MeshLab, CloudCompare).
+        if self.replica.views:
+            self.replica.save(self.memory_dir / "replica.npz")
+            self.replica.save_ply(self.memory_dir / "replica.ply")
+
         with self.lock:
             if self.grid is not None:
                 self.grid.save(self.memory_dir / "grid.npz")
@@ -303,7 +320,7 @@ class Brain:
 
     def run(self):
         """Serve the sim until it disconnects, then save and stop."""
-        for loop in (self._perceive, self._publish):
+        for loop in (self._perceive, self._publish, self._build_replica):
             threading.Thread(
                 target=self._guarded(loop), daemon=True, name=loop.__name__
             ).start()
@@ -444,6 +461,7 @@ class Brain:
             with self.lock:
                 self.grid = None
 
+            self.replica.reset()
             self.status("I don't recognise this place; starting a new map.")
             return True
 
@@ -476,6 +494,35 @@ class Brain:
 
             if self.grid is not None:
                 self.grid.rebuild(poses)
+
+        self._replica_jobs.put(("rebuild", None, poses))
+
+    def _build_replica(self):
+        """The replica's own thread: add views as they come, rebuild after a
+        loop closure. A rebuild of a long drive takes seconds; done here, it
+        never holds up perception. Of several rebuilds queued, only the
+        newest is done."""
+        while self.running:
+            try:
+                job, view, pose = self._replica_jobs.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            if job == "add":
+                self.replica.add(view, pose)
+            else:
+                while True:
+                    try:
+                        newer = self._replica_jobs.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    if newer[0] == "add":
+                        self.replica.keep(newer[1])
+                    else:
+                        pose = newer[2]
+
+                self.replica.rebuild(pose)
 
     # -----------------------------------------------------------------
     # The perception loop
@@ -557,9 +604,18 @@ class Brain:
                         self.settings.occupancy, pose[:2, 3]
                     )
 
+                kept = len(self.grid.scans)
                 self.grid.add(scan, pose)
 
                 self.view = View(frame.id, depth_map, pose, frame.size)
+
+            # A view the map kept is a view for the replica too: its surface
+            # points in colour, added by the replica's own thread.
+            if len(self.grid.scans) > kept:
+                self._replica_jobs.put(("add", replica_module.make_view(
+                    depth_map.depth, depth_map.K, pair.left, lens_height, self.settings.replica,
+                    fix.anchor, fix.anchor_from_base, tilt=tilt,
+                ), pose))
 
             self.timing.update(
                 depth=(measured - started) * 1000.0,
@@ -661,8 +717,33 @@ class Brain:
 
             try:
                 self.link.send("state", fields, arrays)
+                self._send_replica()
             except Closed:
                 return
+
+    def _send_replica(self):
+        """The replica, on its own and only now and then: it runs to a few
+        hundred thousand cubes, too much to send with every state. Sent as
+        whole-cube indices (int16: 1.6 km either way at 5 cm) and colours."""
+        every = float(self.settings.replica.every_seconds)
+
+        if self.replica.version == self._replica_sent or time.monotonic() - self._replica_at < every:
+            return
+
+        self._replica_at = time.monotonic()
+        self._replica_sent = self.replica.version
+        centres, colours = self.replica.cloud()
+        voxel = self.replica.voxel
+
+        # Nothing to send yet -- and an empty array cannot be sent at all.
+        if not len(centres):
+            return
+
+        self.link.send(
+            "replica",
+            {"voxel": voxel, "epoch": self.epoch, "views": len(self.replica.views)},
+            {"index": np.floor(centres / voxel).astype(np.int16), "colour": colours},
+        )
 
     def _split_rooms(self, classes, walls, corner, resolution):
         """Cut the map into rooms (rooms.py) and keep the answer to publish.

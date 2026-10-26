@@ -67,14 +67,26 @@ from habitat.utils.visualizations import maps  # noqa: E402
 from delta import frames, wire  # noqa: E402
 from delta.brain import config as brain_config  # noqa: E402
 from delta.sim import ClimbRate, Imu, Odometer, Rangefinder, World, first_hit  # noqa: E402
+from delta.view3d import OrbitView  # noqa: E402
 
-WINDOW = (1600, 960)
-TOP = 560
-STRIP_TOP = 566
-STATUS_TOP = 934
+# The window, in its own pixels. It is drawn at this size and scaled to
+# whatever size the window really is -- it opens to fit the screen and can
+# be resized -- so nothing below depends on the screen.
+WINDOW = (1920, 1080)
 
-# The log panel, bottom right, and the height box at the top of it.
-LOG_LEFT = 1050
+# Three panels across the top: the 3D view, the 2D map, the 3D replica.
+PANEL = 640
+TOP = 600
+MAP_X = PANEL
+REPLICA_X = 2 * PANEL
+
+STRIP_TOP = TOP + 6
+STATUS_TOP = WINDOW[1] - 26
+
+# The cameras' pictures along the bottom, then the log panel, bottom right,
+# with the height box at the top of it.
+FEED = (600, 375)
+LOG_LEFT = 16 + 2 * FEED[0] + 10
 HEIGHT_BOX_TOP = STRIP_TOP + 24
 HEIGHT_BOX_HEIGHT = 110
 
@@ -169,6 +181,7 @@ class BrainLink:
         self.state = None
         self.state_arrays = {}
         self.state_at = None           # when the last state arrived
+        self.replica = None            # the brain's 3D replica, when sent
         self.said = queue.Queue()
         self.error = None
         self.closed = False
@@ -192,6 +205,10 @@ class BrainLink:
                 elif message.kind == "state":
                     self.state, self.state_arrays = message.fields, message.arrays
                     self.state_at = time.monotonic()
+                elif message.kind == "replica":
+                    # (cube indices, colours, the fields): a new tuple each
+                    # time, which is also how the view knows to redraw.
+                    self.replica = (message.arrays["index"], message.arrays["colour"], message.fields)
                 elif message.kind == "ready":
                     self.ready = True
 
@@ -318,6 +335,7 @@ class DroneApp:
         self.alignment = Alignment()
         self.truth_by_frame = {}
         self.height_by_frame = {}
+        self.true_views = []
 
         # One trace per run. It is appended to line by line as the run goes,
         # so it has to be emptied at the start -- otherwise a second run with
@@ -336,6 +354,8 @@ class DroneApp:
         self.transcript = []
         self.show_truth = True
         self.show_rooms = True
+        self.orbit = OrbitView()
+        self._dragging = None
         self.free_camera = False
         self.autopilot = False
         self.roam = None
@@ -392,7 +412,7 @@ class DroneApp:
         self.view_max = np.asarray(view_max, dtype=np.float64)
 
         span = np.maximum(self.view_max - self.view_min, 1e-6)
-        panel = np.array([800.0, float(TOP)])
+        panel = np.array([float(PANEL), float(TOP)])
 
         self.scale = float(min(panel / span))
         self.panel_offset = (panel - span * self.scale) / 2.0
@@ -460,7 +480,18 @@ class DroneApp:
             os.environ["SDL_VIDEODRIVER"] = "dummy"
 
         pygame.init()
-        self.screen = pygame.display.set_mode(WINDOW)
+
+        # Everything is drawn on `screen`, WINDOW-sized, and shown scaled in
+        # `display`, which opens as big as fits the screen and can be resized.
+        if self.args.headless:
+            size = WINDOW
+        else:
+            info = pygame.display.Info()
+            fit = min(1.0, 0.95 * info.current_w / WINDOW[0], 0.90 * info.current_h / WINDOW[1])
+            size = (int(WINDOW[0] * fit), int(WINDOW[1] * fit))
+
+        self.display = pygame.display.set_mode(size, pygame.RESIZABLE)
+        self.screen = pygame.Surface(WINDOW)
         pygame.display.set_caption(f"DELTA | {self.world.scene_id}")
         pygame.key.set_repeat(400, 40)
         self.font = pygame.font.SysFont("DejaVu Sans", 15)
@@ -508,11 +539,38 @@ class DroneApp:
             if event.type == pygame.QUIT:
                 self.running = False
 
+            elif event.type == pygame.VIDEORESIZE:
+                self.display = pygame.display.set_mode(event.size, pygame.RESIZABLE)
+
             elif event.type == pygame.KEYDOWN:
                 self._key(event)
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                self._click(event.pos)
+                position = self._logical(event.pos)
+
+                if REPLICA_X <= position[0] and position[1] < TOP:
+                    self._dragging = position      # turning the replica
+                else:
+                    self._click(position)
+
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._dragging = None
+
+            elif event.type == pygame.MOUSEMOTION and getattr(self, "_dragging", None):
+                position = self._logical(event.pos)
+                self.orbit.drag(position[0] - self._dragging[0], position[1] - self._dragging[1])
+                self._dragging = position
+
+            elif event.type == pygame.MOUSEWHEEL:
+                position = self._logical(pygame.mouse.get_pos())
+
+                if REPLICA_X <= position[0] and position[1] < TOP:
+                    self.orbit.zoom(event.y)
+
+    def _logical(self, position):
+        """A point in the window, in the drawing's own pixels."""
+        width, height = self.display.get_size()
+        return (position[0] * WINDOW[0] / max(width, 1), position[1] * WINDOW[1] / max(height, 1))
 
     def _key(self, event):
         key = event.key
@@ -542,6 +600,9 @@ class DroneApp:
             self.screenshot()
         elif key == pygame.K_n:
             self.show_rooms = not self.show_rooms
+        elif key == pygame.K_f:
+            self.orbit.follow = not self.orbit.follow
+            self.note(f"Replica view {'follows the drone' if self.orbit.follow else 'stays put'}.")
         elif key == pygame.K_o and not self.free_camera:
             self.world.drone.pitch = 0.0
             self.note("Cameras level.")
@@ -567,7 +628,7 @@ class DroneApp:
 
         x, y = position
 
-        if not (800 <= x < WINDOW[0] and y < TOP):
+        if not (MAP_X <= x < MAP_X + PANEL and y < TOP):
             return
 
         self.plan_to((
@@ -800,6 +861,14 @@ class DroneApp:
         self.truth_by_frame[self.frame_id] = frames.planar(
             frames.world_from_habitat_camera(position, rotation)
         )
+
+        # Where the lens really looked from, every 25 cm or 15 degrees: what
+        # the replica is scored against (score_replica). Examiner's notes.
+        last = self.true_views[-1] if self.true_views else None
+
+        if last is None or math.dist(last[0], position) > 0.25 or \
+                abs(float(np.dot(last[1], rotation))) < math.cos(math.radians(15.0) / 2.0):
+            self.true_views.append((list(position), np.array(rotation)))
         self.truth_by_frame.pop(self.frame_id - 600, None)
 
         # Height and what is under the drone, per frame, so the brain's
@@ -960,14 +1029,70 @@ class DroneApp:
 
         self._draw_viewer()
         self._draw_map()
+        self._draw_replica()
         self._draw_feeds()
         self._draw_transcript()
         self._draw_status()
 
-        pygame.draw.line(screen, (60, 64, 72), (800, 0), (800, TOP), 2)
+        for x in (MAP_X, REPLICA_X):
+            pygame.draw.line(screen, (60, 64, 72), (x, 0), (x, TOP), 2)
+
         pygame.draw.line(screen, (60, 64, 72), (0, TOP), (WINDOW[0], TOP), 2)
 
+        # The drawing, scaled to the window as it is now.
+        if self.display.get_size() == WINDOW:
+            self.display.blit(screen, (0, 0))
+        else:
+            self.display.blit(pygame.transform.smoothscale(screen, self.display.get_size()), (0, 0))
+
         pygame.display.flip()
+
+    def _draw_replica(self):
+        """The brain's 3D replica, in its own frame, orbiting the drone.
+
+        Drag to turn it, scroll to zoom, F to stop following the drone. The
+        orange ring is where the brain believes the drone is; the green one
+        where it really is, put into the brain's frame for comparison --
+        the only truth on this panel, and only on it as a mark.
+        """
+        replica = self.brain.replica if self.brain else None
+        state = self.brain.state if self.brain else None
+        markers = []
+
+        if state and "pose" in state:
+            body = state["pose"].get("body", [state["pose"]["x"], state["pose"]["y"]])
+            altitude = float(state.get("stats", {}).get("altitude") or 0.0)
+            believed = (body[0], body[1], altitude + float(self.drone_config["diameter"]) / 2.0)
+            markers.append((believed, (255, 150, 50), 9))
+
+            if self.orbit.follow:
+                self.orbit.look_at(believed)
+
+            # Where it really is, in the brain's frame: the alignment, undone.
+            here = self.world.drone.position
+            if self.alignment.ready:
+                c, s = math.cos(-self.alignment.yaw), math.sin(-self.alignment.yaw)
+                dx, dy = np.array([here.x, -here.z]) - self.alignment.offset
+                markers.append(((c * dx - s * dy, s * dx + c * dy, float(here.y) - self.floor_height),
+                                (80, 220, 110), 7))
+
+        if replica is not None:
+            index, colour, info = replica
+            centres = (index.astype(np.float32) + 0.5) * float(info["voxel"])
+            image = self.orbit.render(centres, colour, (PANEL, TOP), float(info["voxel"]),
+                                      markers, version=id(replica))
+        else:
+            image = self.orbit.render(np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint8),
+                                      (PANEL, TOP), markers=markers, version=None)
+
+        surface = pygame.surfarray.make_surface(np.transpose(image, (1, 0, 2)))
+        self.screen.blit(surface, (REPLICA_X, 0))
+
+        self._text("3D replica", (REPLICA_X + 12, 10), self.big, (240, 240, 240))
+        count = f"{len(replica[0]):,} cubes from {replica[2].get('views', 0)} views   " if replica else "nothing yet   "
+        self._text(count + "drag: turn   scroll: zoom   F: "
+                   + ("following the drone" if self.orbit.follow else "fixed"),
+                   (REPLICA_X + 12, 34), self.small, (170, 175, 185))
 
     def _place_chase_camera(self):
         """Behind and above the drone, looking at it -- at any height, and
@@ -1094,7 +1219,7 @@ class DroneApp:
         self._outline_drone()
         image = self.world.observe_viewer()
         surface = pygame.surfarray.make_surface(np.transpose(image, (1, 0, 2)))
-        self.screen.blit(pygame.transform.smoothscale(surface, (800, TOP)), (0, 0))
+        self.screen.blit(pygame.transform.smoothscale(surface, (PANEL, TOP)), (0, 0))
 
         label = "Free camera (WASD, IJKL, Z/X) - V to follow" if self.free_camera else "Behind you - V for free camera"
         self._text(label, (12, 10), self.big, (240, 240, 240))
@@ -1116,11 +1241,11 @@ class DroneApp:
         return affine
 
     def _draw_map(self):
-        canvas = np.zeros((TOP, 800, 3), np.uint8)
+        canvas = np.zeros((TOP, PANEL, 3), np.uint8)
         canvas[:] = (20, 23, 28)
 
         if self.show_truth:
-            truth = cv2.warpAffine(self.truth_layer, self.truth_affine, (800, TOP), flags=cv2.INTER_NEAREST)
+            truth = cv2.warpAffine(self.truth_layer, self.truth_affine, (PANEL, TOP), flags=cv2.INTER_NEAREST)
             canvas = np.maximum(canvas, truth)
 
         state = self.brain.state if self.brain else None
@@ -1134,7 +1259,7 @@ class DroneApp:
                 # redrawn at the new scale rather than the one above.
                 canvas[:] = (20, 23, 28)
                 truth = cv2.warpAffine(self.truth_layer, self.truth_affine,
-                                       (800, TOP), flags=cv2.INTER_NEAREST)
+                                       (PANEL, TOP), flags=cv2.INTER_NEAREST)
                 canvas = np.maximum(canvas, truth)
 
         if state and "grid" in state and "grid" in arrays and self.alignment.ready:
@@ -1153,16 +1278,16 @@ class DroneApp:
             colours[(solid == 2) & (grid == 1)] = ROLL_UNDER_COLOUR
             colours[grid == 2] = OCCUPIED_COLOUR
 
-            mask = cv2.warpAffine(((grid > 0) | (solid > 0)).astype(np.uint8), affine, (800, TOP),
+            mask = cv2.warpAffine(((grid > 0) | (solid > 0)).astype(np.uint8), affine, (PANEL, TOP),
                                   flags=cv2.INTER_NEAREST)
-            warped = cv2.warpAffine(colours, affine, (800, TOP), flags=cv2.INTER_NEAREST)
+            warped = cv2.warpAffine(colours, affine, (PANEL, TOP), flags=cv2.INTER_NEAREST)
             canvas[mask > 0] = warped[mask > 0]
 
         # The brain's rooms, each its own tint over the map (N to hide).
         if self.show_rooms and state and "rooms" in state and "rooms" in arrays and self.alignment.ready:
             labels = arrays["rooms"]
             warped = cv2.warpAffine(labels.astype(np.uint8), self._panel_affine(state["rooms"]),
-                                    (800, TOP), flags=cv2.INTER_NEAREST)
+                                    (PANEL, TOP), flags=cv2.INTER_NEAREST)
             # Only the free floor is tinted: what is occupied stays white, so
             # the rooms never hide the map underneath them.
             tinted = (warped > 0) & np.all(canvas == FREE_COLOUR, axis=2)
@@ -1170,9 +1295,9 @@ class DroneApp:
             canvas[tinted] = (0.55 * canvas[tinted] + 0.45 * palette[warped[tinted]]).astype(np.uint8)
 
         surface = pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2)))
-        self.screen.blit(surface, (800, 0))
+        self.screen.blit(surface, (MAP_X, 0))
 
-        offset = np.array([800, 0])
+        offset = np.array([MAP_X, 0])
 
         if state and self.alignment.ready:
             for place in state.get("places", []):
@@ -1229,29 +1354,28 @@ class DroneApp:
             pygame.draw.circle(self.screen, DRONE_TRUE, p, 7, 2)
             pygame.draw.line(self.screen, DRONE_TRUE, p, tip, 2)
 
-        self._text("What the drone believes", (812, 10), self.big, (240, 240, 240))
-        self._text("green: really here   orange: believed here   "
-                   "white: occupied   lilac: can roll under   "
-                   "M: true layout "
-                   + ("on" if self.show_truth else "off")
-                   + "   N: rooms " + ("on" if self.show_rooms else "off"),
-                   (812, 34), self.small, (170, 175, 185))
+        self._text("What the drone believes", (MAP_X + 12, 10), self.big, (240, 240, 240))
+        self._text("green: really here   orange: believed here   white: occupied   lilac: can roll under",
+                   (MAP_X + 12, 34), self.small, (170, 175, 185))
+        self._text("M: true layout " + ("on" if self.show_truth else "off")
+                   + "   N: rooms " + ("on" if self.show_rooms else "off") + "   click: plan a route",
+                   (MAP_X + 12, 50), self.small, (170, 175, 185))
 
         silent = time.monotonic() - self.brain.state_at if self.brain is not None and self.brain.state_at else 0.0
 
         if self.brain is None:
-            self._text("Running without a brain (--no-brain)", (812, 56), self.font, (200, 120, 120))
+            self._text("Running without a brain (--no-brain)", (MAP_X + 12, 70), self.font, (200, 120, 120))
         elif not self.brain.connected:
             message = (f"The brain stopped ({self.brain.error}). Close this window and see outputs/logs/brain.log."
                        if self.brain.error else "Waiting for the brain to start...")
-            self._text(message, (812, 56), self.font, (240, 120, 90))
+            self._text(message, (MAP_X + 12, 70), self.font, (240, 120, 90))
         elif not self.brain.ready:
-            self._text("Brain loading models...", (812, 56), self.font, (220, 180, 90))
+            self._text("Brain loading models...", (MAP_X + 12, 70), self.font, (220, 180, 90))
         elif silent > 3.0:
             # Connected but quiet: the brain is stuck or one of its threads
             # died. Its position and map on screen are frozen, not live.
             self._text(f"The brain has not answered for {silent:.0f} s -- what you see is frozen. "
-                       "See outputs/logs/brain.log.", (812, 56), self.font, (240, 120, 90))
+                       "See outputs/logs/brain.log.", (MAP_X + 12, 70), self.font, (240, 120, 90))
 
     def _draw_feeds(self):
         """The left lens, and the depth the brain made of it.
@@ -1267,14 +1391,14 @@ class DroneApp:
         state = self.brain.state if self.brain else None
         arrays = self.brain.state_arrays if self.brain else {}
 
-        width, height = 512, 320
+        width, height = FEED
 
         self._blit(self.last_glasses["left"], (8, STRIP_TOP + 22), (width, height))
         self._text("Left lens", (8, STRIP_TOP + 2), self.font, (210, 210, 210))
 
         if "depth" in arrays:
             depth = cv2.applyColorMap(255 - arrays["depth"], cv2.COLORMAP_VIRIDIS)[:, :, ::-1]
-            self._blit(depth, (528, STRIP_TOP + 22), (width, height))
+            self._blit(depth, (16 + width, STRIP_TOP + 22), (width, height))
 
             scale = (state or {}).get("stats", {}).get("floor_scale")
             label = "Depth the brain is using (0-6 m)"
@@ -1282,7 +1406,7 @@ class DroneApp:
             if scale:
                 label += f"   floor scale x{scale:.2f}"
 
-            self._text(label, (528, STRIP_TOP + 2), self.font, (210, 210, 210))
+            self._text(label, (16 + width, STRIP_TOP + 2), self.font, (210, 210, 210))
 
     def _draw_transcript(self):
         x, top, bottom = LOG_LEFT, STRIP_TOP + 2, STATUS_TOP - 30
@@ -1798,6 +1922,110 @@ class DroneApp:
         picture[edges & ~cv2.dilate(brain_occupied.astype(np.uint8), near).astype(bool)] = (40, 40, 230)
         cv2.imwrite(str(folder / "live_map" / f"{name}_solid.png"), picture)
 
+    def score_replica(self, name):
+        """Score the brain's 3D replica against the real house.
+
+        The truth: true depth rendered from every place the lens looked from
+        (every 25 cm or 15 degrees of the drive), cut to what the brain
+        keeps -- within 4 m, below 3 m -- and thinned to one point per
+        2.5 cm. The brain's cubes are put in the true frame by the same
+        alignment the map panel uses: drift counts against it.
+
+            accuracy      median distance, brain cube -> nearest true surface
+            precision     share of brain cubes within 5 cm of a true surface
+            completeness  share of true surface within 5 cm of a brain cube
+            F-score       the two together: 2PR / (P + R)
+
+        The measures 3D-reconstruction papers use (5 cm, as on Replica and
+        ScanNet). Appends to outputs/eval/replica.jsonl and saves a picture
+        from above: true surface grey, brain cubes green within 5 cm and red
+        further, true surface it missed blue.
+        """
+        from scipy.spatial import cKDTree
+
+        replica = self.brain.replica if self.brain else None
+
+        if replica is None or not self.alignment.ready or not self.true_views:
+            print(f"[replica] {name}: no replica from the brain yet", flush=True)
+            return
+
+        settings = self.settings.replica
+        max_range, max_height = float(settings.max_range), float(settings.max_height)
+        views = self.true_views[:: max(1, len(self.true_views) // 200)]
+        truth = []
+
+        for position, rotation in views:
+            depth, K = self.world.true_depth_at(position, rotation)
+            height, width = depth.shape
+            v, u = np.mgrid[0:height:2, 0:width:2].astype(np.float32)
+            d = depth[::2, ::2]
+
+            # Habitat's camera: x right, y up, looking down -z.
+            camera = np.stack([(u + 0.5 - K[0, 2]) / K[0, 0] * d, -(v + 0.5 - K[1, 2]) / K[1, 1] * d, -d], axis=-1)
+            keep = (d > 0.1) & (np.hypot(camera[..., 0], camera[..., 2]) < max_range)
+            # The lens's rotation as a matrix: its columns are where it turns
+            # the x, y and z axes to.
+            w, x, y, z = rotation
+            q = mn.Quaternion(mn.Vector3(x, y, z), w)
+            R = np.array([list(q.transform_vector(mn.Vector3(*axis))) for axis in np.eye(3)], np.float32).T
+            world = camera[keep] @ R.T + np.asarray(position, np.float32)
+
+            # Habitat (x, y up, z) -> east, north, height above the floor.
+            points = np.stack([world[:, 0], -world[:, 2], world[:, 1] - self.floor_height], axis=1)
+            truth.append(points[points[:, 2] < max_height])
+
+        truth = np.concatenate(truth)
+        truth = np.unique(np.floor(truth / 0.025).astype(np.int64), axis=0).astype(np.float32) * 0.025 + 0.0125
+
+        index, colour, info = replica
+        cubes = (index.astype(np.float32) + 0.5) * float(info["voxel"])
+        a = self.alignment.matrix()
+        cubes = np.stack([a[0, 0] * cubes[:, 0] + a[0, 1] * cubes[:, 1] + a[0, 2],
+                          a[1, 0] * cubes[:, 0] + a[1, 1] * cubes[:, 1] + a[1, 2], cubes[:, 2]], axis=1)
+
+        to_truth, _ = cKDTree(truth).query(cubes, distance_upper_bound=1.0)
+        to_cubes, _ = cKDTree(cubes).query(truth, distance_upper_bound=1.0)
+
+        precision = float((to_truth < 0.05).mean())
+        completeness = float((to_cubes < 0.05).mean())
+
+        result = {
+            "name": name,
+            "time_s": round(self.clock, 1),
+            "cubes": int(len(cubes)),
+            "true_points": int(len(truth)),
+            "views_scored": len(views),
+            "accuracy_m": round(float(np.median(np.minimum(to_truth, 1.0))), 3),
+            "precision": round(precision, 3),
+            "completeness": round(completeness, 3),
+            "f_score": round(2 * precision * completeness / max(precision + completeness, 1e-9), 3),
+            "pose_error_m": round(self._pose_error(self.brain.state)[0], 3) if self.brain.state and self._pose_error(self.brain.state) else None,
+        }
+        print(f"[replica] {json.dumps(result)}", flush=True)
+
+        folder = PROJECT_ROOT / "outputs" / "eval"
+        (folder / "replica").mkdir(parents=True, exist_ok=True)
+
+        with open(folder / "replica.jsonl", "a") as log:
+            log.write(json.dumps(result) + "\n")
+
+        # From above, 5 cm a pixel.
+        lower = np.minimum(truth.min(axis=0), cubes.min(axis=0))[:2]
+        upper = np.maximum(truth.max(axis=0), cubes.max(axis=0))[:2]
+        size = np.ceil((upper - lower) / 0.05).astype(int) + 1
+        picture = np.full((size[1], size[0], 3), 12, np.uint8)
+
+        def pixels(points):
+            cols = ((points[:, 0] - lower[0]) / 0.05).astype(int)
+            rows = (size[1] - 1 - (points[:, 1] - lower[1]) / 0.05).astype(int)
+            return rows, cols
+
+        picture[pixels(truth)] = (90, 90, 90)
+        picture[pixels(truth[to_cubes >= 0.05])] = (220, 120, 40)
+        picture[pixels(cubes[to_truth < 0.05])] = (80, 200, 90)
+        picture[pixels(cubes[to_truth >= 0.05])] = (40, 40, 230)
+        cv2.imwrite(str(folder / "replica" / f"{name}.png"), picture)
+
     def _true_solid(self):
         """Where something really stands between just off the floor and
         just under the ceiling, and where nothing does: (occupied, free) on
@@ -1907,6 +2135,8 @@ class Script:
         {"score": "name"}                   score the live map (outputs/eval/)
         {"score_rooms": "name"}             score the brain's rooms against
                                             HSSD's room outlines
+        {"score_replica": "name"}           score the brain's 3D replica against
+                                            the real house (true depth)
         {"plan_ahead": 3}                   plan a route to the spot 3 m ahead,
                                             as a click on the map would
         {"fly": 1.2}                        take off if needed and fly to 1.2 m
@@ -1970,6 +2200,9 @@ class Script:
             self._done = True
         elif "score_rooms" in step:
             app.score_rooms(step["score_rooms"])
+            self._done = True
+        elif "score_replica" in step:
+            app.score_replica(step["score_replica"])
             self._done = True
         elif "plan_ahead" in step:
             # A spot this far straight ahead, planned to as a click would.

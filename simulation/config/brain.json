@@ -160,6 +160,26 @@
    "wall_above": 0.8
   }
  },
+ "replica": {
+  "_comment": [
+   "The place in 3D and colour (replica.py): every kept view's surface",
+   "points, binned into cubes `voxel` metres on a side, each the average",
+   "colour of what was seen in it. A cube is shown once seen min_seen",
+   "times, so one stray depth pixel leaves no speck. Points beyond",
+   "max_range are left out -- depth is least sure far away -- and so is",
+   "anything above max_height (sky through a window, a vaulted ceiling",
+   "the map has no use for). step: every step-th depth pixel. Sent to",
+   "the window every every_seconds when it has changed. Each view is",
+   "thinned to one point per `thin`-metre cell before it is kept."
+  ],
+  "voxel": 0.05,
+  "thin": 0.025,
+  "min_seen": 2,
+  "max_range": 4.0,
+  "max_height": 3.0,
+  "step": 2,
+  "every_seconds": 3.0
+ },
  "rooms": {
   "_comment": [
    "Splitting the floor plan into rooms, the way robot vacuums do: the",

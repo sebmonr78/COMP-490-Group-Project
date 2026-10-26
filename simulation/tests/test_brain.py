@@ -496,6 +496,47 @@ def a_loop_closure_redraws_the_map():
 
 
 # ---------------------------------------------------------------------
+# The replica
+# ---------------------------------------------------------------------
+
+
+def the_replica_puts_a_red_wall_where_it_is():
+    """A red wall 2 m ahead of a camera 15 cm up: red cubes at 2 m, from the
+    floor to as high as the camera can see -- and, when a loop closure
+    moves the view's node a metre, the cubes move with it."""
+    from delta.brain import replica as replica_module
+
+    settings = brain_config.load().replica
+    lens = 0.15
+    room = _room(lens)
+
+    depth = np.minimum(room.depth, 2.0).astype(np.float32)
+    rgb = np.zeros(depth.shape + (3,), np.uint8)
+    rgb[..., 0] = 200                                   # red
+
+    view = replica_module.make_view(depth, room.K, rgb, lens, settings, anchor=3)
+    replica = replica_module.Replica(settings)
+    replica.add(view, np.eye(4))
+
+    centres, colours = replica.cloud()
+    wall = np.abs(centres[:, 0] - 2.0) < 0.06
+
+    assert wall.sum() > 100, f"only {wall.sum()} cubes on the wall"
+    assert (colours[wall, 0] > 150).all() and (colours[wall, 1:] < 50).all(), "the wall is not red"
+    top = float(centres[wall, 2].max())
+    assert 1.8 < top < 2.5, f"the wall reaches {top:.2f} m; a 120-degree camera 15 cm up sees ~2.3 m of it at 2 m"
+
+    moved = np.eye(4)
+    moved[1, 3] = 1.0
+    replica.rebuild({3: moved})
+    shifted, _ = replica.cloud()
+
+    assert abs(float(shifted[:, 1].mean() - centres[:, 1].mean()) - 1.0) < 0.06, "the cubes did not follow the node"
+
+    return f"{int(wall.sum())} red cubes on the wall, up to {top:.2f} m; moved with the node"
+
+
+# ---------------------------------------------------------------------
 # Height, from the rangefinder
 # ---------------------------------------------------------------------
 
@@ -738,6 +779,7 @@ TESTS = [
     a_table_is_occupied_and_what_is_under_it_is_not_free,
     a_flying_drone_does_not_clear_the_floor_beneath_it,
     a_loop_closure_redraws_the_map,
+    the_replica_puts_a_red_wall_where_it_is,
     the_height_survives_flying_over_a_table,
     something_low_at_the_edge_of_the_cone_leaves_no_trace,
     climbing_up_stairs_is_not_taken_for_floor,
