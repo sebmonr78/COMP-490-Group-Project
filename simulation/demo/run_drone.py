@@ -105,6 +105,10 @@ KIND_COLOURS = {
 
 FREE_COLOUR = np.array([78, 92, 110], np.uint8)
 OCCUPIED_COLOUR = np.array([235, 232, 220], np.uint8)
+
+# Something there, above rolling height -- a table top, a bed -- with floor
+# the ball can roll on underneath: occupied, but not to it.
+ROLL_UNDER_COLOUR = np.array([150, 140, 175], np.uint8)
 TRUTH_FLOOR = np.array([34, 40, 50], np.uint8)
 TRUTH_EDGE = np.array([70, 78, 94], np.uint8)
 
@@ -1137,11 +1141,20 @@ class DroneApp:
             grid = arrays["grid"]
             affine = self._panel_affine(state["grid"])
 
+            # What is there, from the solid layer -- white where anything
+            # stands, at any height, like the glasses' map -- and, from the
+            # rolling layer, where the ball can still get underneath it.
+            solid = arrays.get("solid")
+            solid = solid if solid is not None and solid.shape == grid.shape else grid
+
             colours = np.zeros(grid.shape + (3,), np.uint8)
-            colours[grid == 1] = FREE_COLOUR
+            colours[(solid == 1) | (grid == 1)] = FREE_COLOUR
+            colours[solid == 2] = OCCUPIED_COLOUR
+            colours[(solid == 2) & (grid == 1)] = ROLL_UNDER_COLOUR
             colours[grid == 2] = OCCUPIED_COLOUR
 
-            mask =cv2.warpAffine((grid > 0).astype(np.uint8), affine, (800, TOP), flags=cv2.INTER_NEAREST)
+            mask = cv2.warpAffine(((grid > 0) | (solid > 0)).astype(np.uint8), affine, (800, TOP),
+                                  flags=cv2.INTER_NEAREST)
             warped = cv2.warpAffine(colours, affine, (800, TOP), flags=cv2.INTER_NEAREST)
             canvas[mask > 0] = warped[mask > 0]
 
@@ -1150,9 +1163,11 @@ class DroneApp:
             labels = arrays["rooms"]
             warped = cv2.warpAffine(labels.astype(np.uint8), self._panel_affine(state["rooms"]),
                                     (800, TOP), flags=cv2.INTER_NEAREST)
-            tinted = warped > 0
+            # Only the free floor is tinted: what is occupied stays white, so
+            # the rooms never hide the map underneath them.
+            tinted = (warped > 0) & np.all(canvas == FREE_COLOUR, axis=2)
             palette = np.array([(0, 0, 0)] + ROOM_COLOURS * 26, np.float32)[:256]
-            canvas[tinted] = (0.45 * canvas[tinted] + 0.55 * palette[warped[tinted]]).astype(np.uint8)
+            canvas[tinted] = (0.55 * canvas[tinted] + 0.45 * palette[warped[tinted]]).astype(np.uint8)
 
         surface = pygame.surfarray.make_surface(np.transpose(canvas, (1, 0, 2)))
         self.screen.blit(surface, (800, 0))
@@ -1216,7 +1231,7 @@ class DroneApp:
 
         self._text("What the drone believes", (812, 10), self.big, (240, 240, 240))
         self._text("green: really here   orange: believed here   "
-                   "white: occupied   "
+                   "white: occupied   lilac: can roll under   "
                    "M: true layout "
                    + ("on" if self.show_truth else "off")
                    + "   N: rooms " + ("on" if self.show_rooms else "off"),
@@ -1476,13 +1491,23 @@ class DroneApp:
     def _truth_grid(self):
         """The navmesh as a 5 cm picture, and its corner (x, z)."""
         if self._navigable is None:
-            self._navigable = maps.get_topdown_map(
-                self.world.pathfinder, self.floor_height, meters_per_pixel=0.05, draw_border=False
-            ) == 1
+            self._navigable = self._floor_slice(self.world.pathfinder)
             lower, _ = self.world.pathfinder.get_bounds()
             self._nav_lower = np.array([lower.x, lower.z])
 
         return self._navigable, self._nav_lower
+
+    def _floor_slice(self, pathfinder):
+        """A navmesh at FLOOR level, as a 5 cm picture: where its robot can
+        be on the floor.
+
+        Not maps.get_topdown_map: that slices with Habitat's default slack
+        of 0.5 m, so the tops of beds and sofa seats -- separate navmesh
+        islands, 0.4-0.5 m up -- came out as floor, and the scores called
+        the brain wrong for marking a bed occupied. 10 cm is the floor, its
+        rugs and its thresholds, and nothing standing on it.
+        """
+        return np.asarray(pathfinder.get_topdown_view(0.05, self.floor_height, 0.10), dtype=bool)
 
     def score_rooms(self, name):
         """Score the brain's rooms against HSSD's room outlines.
@@ -1644,13 +1669,7 @@ class DroneApp:
             print(f"[score] {name}: no map from the brain yet", flush=True)
             return
 
-        if self._navigable is None:
-            self._navigable = maps.get_topdown_map(
-                self.world.pathfinder, self.floor_height, meters_per_pixel=0.05, draw_border=False
-            ) == 1
-            lower, _ = self.world.pathfinder.get_bounds()
-            self._nav_lower = np.array([lower.x, lower.z])
-
+        self._truth_grid()
         resolution, lower = 0.05, self._nav_lower
 
         # Grid cell -> brain world -> true world -> navmesh pixel (x, z = -north).
@@ -1700,6 +1719,29 @@ class DroneApp:
         seen_clear = clear & (classes != 0)
         error = self._pose_error(state)
 
+        # The solid layer -- what is THERE, at any height -- against the truth
+        # of the same question (_true_solid). Edges, because that is what a
+        # camera sees of a sofa or a wall: its inside stays unknown.
+        brain_solid = cv2.warpAffine(arrays.get("solid", arrays["grid"]).astype(np.uint8), affine,
+                                     (width, height), flags=cv2.INTER_NEAREST, borderValue=0)
+        true_occupied, true_free = (np.pad(a, padding) for a in self._true_solid())
+        explored = cv2.dilate((brain_solid > 0).astype(np.uint8), disc(0.10)).astype(bool)
+        edges = true_occupied & cv2.dilate(true_free.astype(np.uint8), disc(0.05)).astype(bool) & explored
+        near = disc(0.05)
+        brain_occupied = brain_solid == 2
+
+        solid_scores = {
+            # Of the true edges of things where the drone has looked: marked occupied.
+            "solid_found": round(float((edges & cv2.dilate(brain_occupied.astype(np.uint8), near).astype(bool)).sum()
+                                       / max(edges.sum(), 1)), 3),
+            # Of what it marked occupied: something really there.
+            "solid_right": round(float((brain_occupied & cv2.dilate(true_occupied.astype(np.uint8), near).astype(bool)).sum()
+                                       / max(brain_occupied.sum(), 1)), 3),
+            # Of what it marked free: something really there after all.
+            "solid_free_wrong": round(float(((brain_solid == 1) & ~cv2.dilate(true_free.astype(np.uint8), near).astype(bool)).sum()
+                                            / max((brain_solid == 1).sum(), 1)), 3),
+        }
+
         result = {
             "name": name,
             "time_s": round(self.clock, 1),
@@ -1725,6 +1767,7 @@ class DroneApp:
             # "Stop." warnings said since the last score.
             "stops": sum(1 for kind, text in self.transcript[getattr(self, "_scored_upto", 0):]
                          if text.endswith("Stop.")),
+            **solid_scores,
         }
         self._scored_upto = len(self.transcript)
         print(f"[score] {json.dumps(result)}", flush=True)
@@ -1743,6 +1786,65 @@ class DroneApp:
         picture[solid & clear] = (0, 150, 255)
         cv2.rectangle(picture, (left, top), (left + truth_width - 1, top + truth_height - 1), (90, 90, 90), 1)
         cv2.imwrite(str(folder / "live_map" / f"{name}.png"), picture)
+
+        # The solid layer: true things dark grey, the brain's occupied white
+        # where right and orange where nothing is there, its free blue, and
+        # true edges it has looked at but not marked in red.
+        picture = np.full((height, width, 3), 15, np.uint8)
+        picture[true_occupied] = (55, 55, 55)
+        picture[brain_solid == 1] = (170, 110, 60)
+        picture[brain_occupied] = (0, 150, 255)
+        picture[brain_occupied & cv2.dilate(true_occupied.astype(np.uint8), near).astype(bool)] = (235, 235, 235)
+        picture[edges & ~cv2.dilate(brain_occupied.astype(np.uint8), near).astype(bool)] = (40, 40, 230)
+        cv2.imwrite(str(folder / "live_map" / f"{name}_solid.png"), picture)
+
+    def _true_solid(self):
+        """Where something really stands between just off the floor and
+        just under the ceiling, and where nothing does: (occupied, free) on
+        the navmesh picture. The answer key for the solid layer.
+
+        Asked of Habitat's own geometry by building a second navmesh for an
+        imaginary robot 1.8 m tall and 5 cm wide, which can stand only where
+        nothing at all is overhead below 1.8 m. Where it can stand is free;
+        what it cannot, near floor, is something there. Built once a run.
+        """
+        if getattr(self, "_solid_truth", None) is not None:
+            return self._solid_truth
+
+        navigable, lower = self._truth_grid()
+
+        settings = habitat_sim.NavMeshSettings()
+        settings.set_defaults()
+        settings.agent_height = 1.8
+        settings.agent_radius = 0.05
+        settings.agent_max_climb = 0.08
+        settings.agent_max_slope = 45.0
+        settings.cell_size = 0.05
+        settings.cell_height = 0.02
+        settings.include_static_objects = True
+
+        tall = habitat_sim.nav.PathFinder()
+        self.world.simulator.recompute_navmesh(tall, settings)
+
+        # Its own picture, then shifted onto the drone navmesh's grid.
+        free = self._floor_slice(tall)
+        tall_lower, _ = tall.get_bounds()
+        dc = int(round((tall_lower.x - lower[0]) / 0.05))
+        dr = int(round((tall_lower.z - lower[1]) / 0.05))
+
+        true_free = np.zeros(navigable.shape, bool)
+        rows = slice(max(0, dr), min(navigable.shape[0], dr + free.shape[0]))
+        cols = slice(max(0, dc), min(navigable.shape[1], dc + free.shape[1]))
+        true_free[rows, cols] = free[rows.start - dr:rows.stop - dr, cols.start - dc:cols.stop - dc]
+
+        # Something there: not free, but next to floor someone could reach --
+        # walls, furniture, the space under a table -- not the world outside.
+        square = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+        near_floor = cv2.dilate((navigable | true_free).astype(np.uint8), square).astype(bool)
+        true_occupied = near_floor & ~true_free
+
+        self._solid_truth = (true_occupied, true_free)
+        return self._solid_truth
 
 
 def _room_scores(brain, truth, names, kinds):

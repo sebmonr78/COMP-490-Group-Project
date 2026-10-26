@@ -124,6 +124,22 @@
    10.0
   ],
   "_keyframe_spacing": "metres and degrees of movement before another view is kept for redrawing the map",
+  "solid": {
+   "_comment": [
+    "What is THERE, at any height up to just under the ceiling: the map as",
+    "you would draw it, and the white in the window. The glasses' map was",
+    "this (0.15 to 1.9 m: anything a person walks into) and showed tables,",
+    "sofas and walls as solid. The rolling map above (obstacle_band) asks",
+    "something narrower -- where the ball can roll -- and from 15 cm up a",
+    "table is only its legs to it. Both are kept: this one to look at and",
+    "to fly by, that one to roll by. Its free floor stops at the first",
+    "thing at any height, so floor seen under a table is not free here.",
+    "",
+    "1.8, not the glasses' 1.9: ceilings in HSSD houses can be 1.97 m, and",
+    "a 1.9 m top let the ceiling in as phantom walls (see obstacle_band)."
+   ],
+   "band": [0.08, 1.8]
+  },
   "walls": {
    "_comment": [
     "The floor plan, for splitting the map into rooms (rooms.py): is",

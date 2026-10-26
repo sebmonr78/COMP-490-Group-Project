@@ -399,6 +399,45 @@ def a_scan_marks_floor_free_and_walls_solid():
     return f"{int((classes == FREE).sum())} cells free after one scan"
 
 
+def a_table_is_occupied_and_what_is_under_it_is_not_free():
+    """Flying 1 m up, a table top 0.75 m high from 1.5 to 2.5 m ahead.
+
+    The rolling map cannot see it at all -- 0.75 m is above anything the
+    ball bumps into -- which is why the map looked empty of furniture. The
+    solid layer must mark it, and must not call the floor beyond it free
+    just because floor was seen past it: from up here the table hides what
+    is under it."""
+    settings = brain_config.load().occupancy
+    lens = 1.0 + 0.15
+    room = _room(lens)
+
+    K = room.K
+    height, width = room.depth.shape
+    u, v = np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5)
+    rays = np.linalg.inv(K) @ np.stack([u.ravel(), v.ravel(), np.ones(u.size)])
+    up = (LEVEL[2, :3] @ rays).reshape(height, width)
+
+    depth = room.depth.copy()
+    down = up < -0.02
+    to_table = np.where(down, (lens - 0.75) / np.maximum(-up, 1e-6), np.inf)
+    on_table = down & (to_table >= 1.5) & (to_table <= 2.5)
+    depth[on_table] = np.minimum(depth[on_table], to_table[on_table])
+
+    scan = occupancy.make_scan(depth, K, lens, settings, footprint=(0.0, 0.0, 0.15), footprint_free=False)
+
+    table_hits = scan.solid[(scan.solid[:, 0] >= 1.4) & (scan.solid[:, 0] <= 2.6)]
+    assert len(table_hits) > 20, f"the table gave {len(table_hits)} solid points"
+    assert not ((scan.hits[:, 0] >= 1.4) & (scan.hits[:, 0] <= 2.6)).any(), (
+        "the rolling map marked a table top 0.75 m up -- the ball rolls under that"
+    )
+
+    ahead = np.abs(scan.solid_free[:, 1]) < 0.2
+    reach = float(scan.solid_free[ahead, 0].max())
+    assert reach < 1.6, f"the solid layer called floor free {reach:.1f} m ahead, under or past the table"
+
+    return f"{len(table_hits)} solid points on the table; free floor stops at {reach:.2f} m, before it"
+
+
 def a_flying_drone_does_not_clear_the_floor_beneath_it():
     """The glasses always marked the cell underfoot as free floor, correctly:
     a person standing somewhere proves it is standable. A flying drone proves
@@ -696,6 +735,7 @@ TESTS = [
     the_floor_is_still_found_at_a_head_height,
     a_wrong_scale_is_refused,
     a_scan_marks_floor_free_and_walls_solid,
+    a_table_is_occupied_and_what_is_under_it_is_not_free,
     a_flying_drone_does_not_clear_the_floor_beneath_it,
     a_loop_closure_redraws_the_map,
     the_height_survives_flying_over_a_table,

@@ -53,6 +53,12 @@ class Scan:
     # sofas or chairs, which stop below it. What rooms.py splits rooms by.
     walls: np.ndarray = None
 
+    # The same two things for everything from just off the floor to just
+    # under the ceiling (settings.solid.band): points of whatever is there,
+    # and the floor seen with nothing standing on it at any height.
+    solid: np.ndarray = None
+    solid_free: np.ndarray = None
+
     def world_from_base(self, node_poses):
         """Where the view was taken from, as the map currently has it."""
         if self.anchor not in node_poses:
@@ -107,9 +113,12 @@ def make_scan(depth, K, lens_height, settings, footprint, anchor=0,
     obstacle = seen & (above_floor > low) & (above_floor < high)
 
     # Per direction: free from the nearest floor seen to whichever comes
-    # first, the first obstacle or the furthest floor seen.
+    # first, the first obstacle or the furthest floor seen. Half-degree
+    # directions: at 1.3 degrees (90 across the view) each was 9 cm wide at
+    # 4 m, and floor seen through a doorway fanned out across the wall
+    # beside it in the same direction.
     half_fov = math.atan((width / 2.0) / fx)
-    bins = 90
+    bins = 240
     edges = np.linspace(-half_fov, half_fov, bins + 1)
     angle = np.arctan2(left, forward)
 
@@ -121,47 +130,55 @@ def make_scan(depth, K, lens_height, settings, footprint, anchor=0,
 
     nearest_floor = per_bin(floor, np.minimum, np.inf)
     furthest_floor = per_bin(floor, np.maximum, 0.0)
-    nearest_obstacle = per_bin(obstacle, np.minimum, np.inf)
 
     resolution = float(settings.resolution)
-
-    outer = np.minimum(furthest_floor, nearest_obstacle - resolution)
-    inner = nearest_floor
-    has_free = np.isfinite(inner) & (outer > inner)
-
     centres = 0.5 * (edges[:-1] + edges[1:])
-    inner = np.where(has_free, inner, 0.0)
-    outer = np.where(has_free, outer, 0.0)
 
-    # An annulus-shaped polygon: out along the near edge, back along the far.
-    # Directions with nothing seen collapse to zero width.
-    near_edge = np.stack([inner * np.cos(centres), inner * np.sin(centres)], axis=1)
-    far_edge = np.stack([outer * np.cos(centres), outer * np.sin(centres)], axis=1)
-    polygon = np.concatenate([near_edge, far_edge[::-1]]).astype(np.float32)
+    def free_polygon(blocking):
+        """The floor seen free in each direction: from the nearest floor
+        seen to whichever comes first, the first `blocking` point or the
+        furthest floor seen -- as an annulus-shaped polygon, out along the
+        near edge and back along the far. Directions with nothing seen
+        collapse to zero width."""
+        if not free_space:
+            return np.zeros((0, 2), np.float32)
 
-    if not free_space:
-        polygon = np.zeros((0, 2), np.float32)
+        outer = np.minimum(furthest_floor, per_bin(blocking, np.minimum, np.inf) - resolution)
+        inner = nearest_floor
+        has_free = np.isfinite(inner) & (outer > inner)
+        inner = np.where(has_free, inner, 0.0)
+        outer = np.where(has_free, outer, 0.0)
 
-    # A borrowed scale is trusted only up close: 15% of 30 cm is nothing,
-    # 15% of 3 m puts a sofa where the wearer is standing.
-    if not free_space:
-        obstacle &= horizontal < BORROWED_RANGE
+        near_edge = np.stack([inner * np.cos(centres), inner * np.sin(centres)], axis=1)
+        far_edge = np.stack([outer * np.cos(centres), outer * np.sin(centres)], axis=1)
+        return np.concatenate([near_edge, far_edge[::-1]]).astype(np.float32)
 
-    hits = np.stack([forward[obstacle], left[obstacle]], axis=1)
-    hits = np.unique(np.round(hits / resolution).astype(np.int32), axis=0)
-    hits = (hits * resolution).astype(np.float32)
+    def points(mask):
+        """Floor-plan points of a mask, one per cell. A borrowed scale is
+        trusted only up close: 15% of 30 cm is nothing, 15% of 3 m puts a
+        sofa where the wearer is standing."""
+        if not free_space:
+            mask = mask & (horizontal < BORROWED_RANGE)
+
+        cells = np.stack([forward[mask], left[mask]], axis=1)
+        cells = np.unique(np.round(cells / resolution).astype(np.int32), axis=0)
+        return (cells * resolution).astype(np.float32)
+
+    # Rolling height: what stops the ball.
+    polygon = free_polygon(obstacle)
+    hits = points(obstacle)
+
+    # Anything up to just under the ceiling: what is THERE -- the map as you
+    # would draw it, tables, sofas and walls solid. Its free floor stops at
+    # the first thing at any height, so the floor under a table, seen past
+    # its legs, is not called free.
+    solid_low, solid_high = _band(settings, "solid", (0.08, 1.8))
+    solid_mask = seen & (above_floor > solid_low) & (above_floor < solid_high)
 
     # Wall-high points, for the floor plan (rooms.py).
-    walls_settings = settings.get("walls", {}) if hasattr(settings, "get") else {}
-    wall_low, wall_high = walls_settings.get("band", (0.9, 1.8))
-    wall = seen & (above_floor > float(wall_low)) & (above_floor < float(wall_high))
-
-    if not free_space:
-        wall &= horizontal < BORROWED_RANGE
-
-    walls = np.stack([forward[wall], left[wall]], axis=1)
-    walls = np.unique(np.round(walls / resolution).astype(np.int32), axis=0)
-    walls = (walls * resolution).astype(np.float32)
+    wall_low, wall_high = _band(settings, "walls", (0.9, 1.8))
+    wall = seen & (above_floor > wall_low) & (above_floor < wall_high)
+    walls = points(wall)
 
     body = np.asarray(footprint, dtype=np.float32).copy()
 
@@ -175,7 +192,16 @@ def make_scan(depth, K, lens_height, settings, footprint, anchor=0,
         hits=hits,
         footprint=body,
         walls=walls,
+        solid=points(solid_mask),
+        solid_free=free_polygon(solid_mask),
     )
+
+
+def _band(settings, name, default):
+    """(low, high) metres above the floor, from settings.<name>.band."""
+    section = settings.get(name, {}) if hasattr(settings, "get") else {}
+    low, high = section.get("band", default)
+    return float(low), float(high)
 
 
 class OccupancyGrid:
@@ -195,7 +221,13 @@ class OccupancyGrid:
         self.occupied_above = float(settings.occupied_above)
         self.free_below = float(settings.free_below)
 
-        # A second layer, in the same cells: is there something WALL-HIGH here? The floor plan, for
+        # A second layer, in the same cells and with the same evidence rules:
+        # is ANYTHING here, from just off the floor to just under the
+        # ceiling? The map as you would draw it -- tables, sofas and walls
+        # solid -- where the layer above is the map of where the ball rolls.
+        self.solid = np.zeros((cells, cells), np.float32)
+
+        # A third: is there something WALL-HIGH here? The floor plan, for
         # telling rooms apart (rooms.py). Seen floor votes against a wall
         # (a wall reaches the floor), a wall-high point votes for one.
         walls = settings.get("walls", {}) if hasattr(settings, "get") else {}
@@ -246,6 +278,7 @@ class OccupancyGrid:
     def rebuild(self, node_poses):
         """Redraw everything from the kept scans, at their current poses."""
         self.logodds[:] = 0.0
+        self.solid[:] = 0.0
         self.walls[:] = 0.0
 
         for scan in self.scans:
@@ -302,11 +335,35 @@ class OccupancyGrid:
             walls[seen] += self.wall_miss
             np.clip(walls, *self.wall_limits, out=walls)
 
+        # The solid layer's own free floor: nothing at any height on it.
+        if scan.solid_free is not None and len(scan.solid_free) >= 3:
+            self._add_free(self.solid, np.round(self.to_cells(to_world(scan.solid_free))).astype(np.int32))
+
         # Hits after free, so a wall on the edge of the free area stays a wall.
         self._add_hits(self.logodds, scan.hits, to_world, self.hit, self.limits[1])
 
+        if scan.solid is not None:
+            self._add_hits(self.solid, scan.solid, to_world, self.hit, self.limits[1])
+
         if scan.walls is not None:
             self._add_hits(self.walls, scan.walls, to_world, self.wall_hit, self.wall_limits[1])
+
+    def _add_free(self, layer, polygon):
+        """One miss for every cell inside a polygon of cells, drawn in a
+        window around it only."""
+        rows, cols = layer.shape
+        c0, r0 = np.clip(polygon.min(axis=0) - 1, 0, [cols, rows])
+        c1, r1 = np.clip(polygon.max(axis=0) + 2, 0, [cols, rows])
+
+        if c1 <= c0 or r1 <= r0:
+            return
+
+        free = np.zeros((r1 - r0, c1 - c0), np.uint8)
+        cv2.fillPoly(free, [polygon - np.array([c0, r0])], 1)
+
+        window = layer[r0:r1, c0:c1]
+        window[free.astype(bool)] += self.miss
+        np.clip(window, *self.limits, out=window)
 
     def _add_hits(self, layer, points, to_world, hit, ceiling):
         """One vote per cell for each floor-plan point, however many land in it."""
@@ -323,12 +380,18 @@ class OccupancyGrid:
     # Reading it
     # -----------------------------------------------------------------
 
-    def classes(self):
-        """UNKNOWN, FREE or OCCUPIED for every cell."""
-        out = np.full(self.logodds.shape, UNKNOWN, np.uint8)
-        out[self.logodds < self.free_below] = FREE
-        out[self.logodds > self.occupied_above] = OCCUPIED
+    def classes(self, layer=None):
+        """UNKNOWN, FREE or OCCUPIED for every cell -- of the rolling map,
+        or of `layer` (self.solid) by the same thresholds."""
+        layer = self.logodds if layer is None else layer
+        out = np.full(layer.shape, UNKNOWN, np.uint8)
+        out[layer < self.free_below] = FREE
+        out[layer > self.occupied_above] = OCCUPIED
         return out
+
+    def solid_classes(self):
+        """UNKNOWN, FREE or OCCUPIED of anything up to just under the ceiling."""
+        return self.classes(self.solid)
 
     def wall_cells(self):
         """True where the map has seen something wall-high."""
@@ -336,7 +399,7 @@ class OccupancyGrid:
 
     def known_bounds(self, margin=1.0):
         """(row0, row1, col0, col1) around every cell with any evidence."""
-        rows, cols = np.nonzero(self.logodds != 0.0)
+        rows, cols = np.nonzero((self.logodds != 0.0) | (self.solid != 0.0))
 
         if len(rows) == 0:
             return None
@@ -371,15 +434,21 @@ class OccupancyGrid:
 
         free, free_lengths = flatten([s.free for s in self.scans])
         hits, hit_lengths = flatten([s.hits for s in self.scans])
-        walls, wall_lengths = flatten([
-            s.walls if s.walls is not None else np.zeros((0, 2), np.float32) for s in self.scans
-        ])
+        def or_empty(points):
+            return points if points is not None else np.zeros((0, 2), np.float32)
+
+        walls, wall_lengths = flatten([or_empty(s.walls) for s in self.scans])
+        solid, solid_lengths = flatten([or_empty(s.solid) for s in self.scans])
+        solid_free, solid_free_lengths = flatten([or_empty(s.solid_free) for s in self.scans])
 
         np.savez_compressed(
             path,
             logodds=self.logodds,
             walls_layer=self.walls,
             walls=walls, wall_lengths=wall_lengths,
+            solid_layer=self.solid,
+            solid=solid, solid_lengths=solid_lengths,
+            solid_free=solid_free, solid_free_lengths=solid_free_lengths,
             origin=self.origin,
             resolution=self.resolution,
             anchors=np.array([s.anchor for s in self.scans], dtype=np.int64),
@@ -409,11 +478,20 @@ class OccupancyGrid:
             self.walls[:] = 0.0
             walls = [None] * len(data["anchors"])
 
+        # ...and before the solid layer, no solid points.
+        if "solid" in data:
+            self.solid[:] = data["solid_layer"]
+            solid = np.split(data["solid"], np.cumsum(data["solid_lengths"])[:-1])
+            solid_free = np.split(data["solid_free"], np.cumsum(data["solid_free_lengths"])[:-1])
+        else:
+            self.solid[:] = 0.0
+            solid = solid_free = [None] * len(data["anchors"])
+
         self.scans = [
-            Scan(int(anchor), pose, f, h, footprint, w)
-            for anchor, pose, f, h, footprint, w in zip(
+            Scan(int(anchor), pose, f, h, footprint, w, s, sf)
+            for anchor, pose, f, h, footprint, w, s, sf in zip(
                 data["anchors"], data["anchor_from_base"], free, hits,
-                data["footprints"], walls,
+                data["footprints"], walls, solid, solid_free,
             )
         ]
 
