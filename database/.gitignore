@@ -4,3 +4,7 @@
 delta.db
 delta.db-wal
 delta.db-shm
+
+# Python's compiled copies of our code. Python remakes them, so don't commit them.
+__pycache__/
+*.pyc
