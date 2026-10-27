@@ -12,22 +12,29 @@ the window there, and let the browser watch and control it:
 The simulation still renders with the GPU (Habitat uses EGL, not the
 screen); the screen only receives the finished pictures, which is cheap.
 
+Each run gets its own screen, its own VNC password and its own viewer port,
+so several people can each have their own window at the same time. The
+viewer ports are DELTA_VIEWER_PORT and the ones right after it (6080, 6081,
+6082, ... one per simulation that can run at once).
+
 Needs, on the server:
 
     sudo apt install xvfb x11vnc novnc websockify
 
 Settings (environment variables, all optional):
 
-    DELTA_VIEWER_PORT   port the browser connects to   (default 6080)
+    DELTA_VIEWER_PORT   first port the browser connects to   (default 6080)
     DELTA_NOVNC_DIR     where noVNC's files are        (default /usr/share/novnc)
 """
 
 import os
+import secrets
 import shutil
 import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -39,8 +46,13 @@ REQUIRED_PROGRAMS = ["Xvfb", "x11vnc", "websockify"]
 INSTALL_HINT = "On the server run: sudo apt install xvfb x11vnc novnc websockify"
 
 
-def viewer_port():
+def first_viewer_port():
     return int(os.environ.get("DELTA_VIEWER_PORT", "6080"))
+
+
+# Two screens starting at the same moment could both pick the same free
+# display number before either Xvfb has taken it, so they take turns.
+_start_lock = threading.Lock()
 
 
 def novnc_dir():
@@ -64,15 +76,20 @@ def _free_display():
     raise RuntimeError("No free display number between :99 and :139")
 
 
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def _port_in_use(port):
     with socket.socket() as s:
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _read_port(path):
+    # x11vnc -flag writes "PORT=5901" to the file once it is listening
+    try:
+        text = path.read_text().strip()
+    except OSError:
+        return None
+    if text.startswith("PORT=") and text[5:].isdigit():
+        return int(text[5:])
+    return None
 
 
 def _wait_for(check, seconds, what):
@@ -85,9 +102,14 @@ def _wait_for(check, seconds, what):
 
 
 class VirtualScreen:
-    def __init__(self):
+    def __init__(self, port):
+        self.port = port      # the viewer port the browser connects to
         self.display = None
         self.processes = []
+        # Only the person who started this run is given the password, so
+        # nobody else can open their window by trying the other ports.
+        # (VNC only uses the first 8 characters of a password.)
+        self.password = secrets.token_urlsafe(6)[:8]
         # Each helper's error output goes here, so a failure can say why
         self.log_dir = Path(tempfile.mkdtemp(prefix="delta-screen-"))
 
@@ -97,27 +119,39 @@ class VirtualScreen:
         if missing:
             raise RuntimeError(f"Missing {', '.join(missing)}. {INSTALL_HINT}")
 
-        port = viewer_port()
+        port = self.port
         if _port_in_use(port):
             raise RuntimeError(
                 f"Port {port} is already in use. If an earlier run was left "
                 f"behind, run `pkill websockify` on the server. Otherwise set "
-                f"DELTA_VIEWER_PORT to another port.")
+                f"DELTA_VIEWER_PORT to a different first port.")
 
-        number = _free_display()
-        self.display = f":{number}"
-        vnc_port = _free_port()
+        # x11vnc reads the password from this file and deletes it ("rm:"),
+        # so it never shows up in `ps` and is not left on disk
+        password_file = self.log_dir / "passwd"
+        password_file.touch(mode=0o600)
+        password_file.write_text(self.password + "\n")
 
         try:
-            self._launch(["Xvfb", self.display, "-screen", "0", SCREEN_SIZE,
-                          "-nolisten", "tcp"])
-            _wait_for(lambda: Path(f"/tmp/.X11-unix/X{number}").exists(), 10, "Xvfb")
+            # One screen starts at a time: otherwise two could pick the same
+            # free display or VNC port before either has actually taken it
+            with _start_lock:
+                number = _free_display()
+                self.display = f":{number}"
+                self._launch(["Xvfb", self.display, "-screen", "0", SCREEN_SIZE,
+                              "-nolisten", "tcp"])
+                _wait_for(lambda: Path(f"/tmp/.X11-unix/X{number}").exists(), 10, "Xvfb")
 
-            # -localhost: VNC itself is only reachable through websockify
-            self._launch(["x11vnc", "-display", self.display, "-rfbport", str(vnc_port),
-                          "-localhost", "-forever", "-shared", "-nopw", "-quiet",
-                          "-noxdamage"])
-            _wait_for(lambda: _port_in_use(vnc_port), 10, "x11vnc")
+                # -localhost: VNC itself is only reachable through websockify.
+                # x11vnc picks a free VNC port itself (-autoport) and writes
+                # it to vnc_port_file once it is listening (-flag).
+                vnc_port_file = self.log_dir / "vncport"
+                self._launch(["x11vnc", "-display", self.display, "-autoport", "5900",
+                              "-localhost", "-forever", "-shared",
+                              "-passwdfile", f"rm:{password_file}", "-quiet",
+                              "-noxdamage", "-flag", str(vnc_port_file)])
+                _wait_for(lambda: _read_port(vnc_port_file) is not None, 10, "x11vnc")
+                vnc_port = _read_port(vnc_port_file)
 
             self._launch(["websockify", "--web", str(novnc_dir()),
                           f"0.0.0.0:{port}", f"127.0.0.1:{vnc_port}"])

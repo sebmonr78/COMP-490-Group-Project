@@ -13,13 +13,18 @@ and keeps their output so the page can show it.
 Only the scripts listed in SIMULATIONS can be started. The page sends an id,
 never a path or a command, so nobody can use this to run anything else.
 
-One simulation at a time: they all load the same house onto the same GPU.
+Each login session gets its own run: its own process, and for "Run in
+browser" its own invisible screen and viewer port. The same account logged in
+on two devices counts as two sessions, so it gets two runs. A session has one
+run at a time, and the whole server at most DELTA_MAX_SIMULATIONS, because
+every run loads the house onto the same GPU.
 
 Settings (environment variables, all optional):
 
-    DELTA_CONDA_ENV     conda env to run in   (default: the one project.json asks for)
-    DELTA_SIM_PYTHON    a python to use instead of conda run, e.g.
-                        ~/miniconda3/envs/habitat/bin/python
+    DELTA_CONDA_ENV         conda env to run in   (default: the one project.json asks for)
+    DELTA_SIM_PYTHON        a python to use instead of conda run, e.g.
+                            ~/miniconda3/envs/habitat/bin/python
+    DELTA_MAX_SIMULATIONS   how many can run at once, across everyone (default 3)
 """
 
 import atexit
@@ -34,7 +39,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 import virtual_screen
 
@@ -72,11 +77,36 @@ SIMULATIONS = {
 
 router = APIRouter(prefix="/api/simulations")
 
-# The current (or most recent) run. Guarded by _lock because the reader
-# thread writes to it while requests read from it.
+# The login cookie main.py hands out. Each value is one login session, and
+# that is who a run belongs to. main.py only lets logged-in requests in here.
+SESSION_COOKIE = "delta_session"
+
+# Every session's current (or most recent) run: session token --> run.
+# Guarded by _lock because the reader threads write to the runs while
+# requests read from them.
 _lock = threading.Lock()
-_run = None
+_runs = {}
 _run_count = 0  # numbers each run, so the page can tell runs apart
+
+
+def max_running():
+    try:
+        return max(1, int(os.environ.get("DELTA_MAX_SIMULATIONS", "3")))
+    except ValueError:
+        return 3
+
+
+def viewer_ports():
+    """The ports "Run in browser" can use: one per simulation that can run at once."""
+    first = virtual_screen.first_viewer_port()
+    return range(first, first + max_running())
+
+
+def _owner(request: Request):
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise HTTPException(status_code=401, detail="Log in first")
+    return token
 
 
 def _now():
@@ -158,10 +188,18 @@ def _read_output(run):
             run["status"] = "stopped"
         else:
             run["status"] = "finished" if code == 0 else "failed"
+        # Its owner logged out while it ran: nobody is left to show it to
+        token = run.get("owner_gone")
+        if token and _runs.get(token) is run:
+            del _runs[token]
 
 
-def _is_running():
-    return _run is not None and _run["status"] in ("running", "stopping")
+def _is_running(run):
+    return run is not None and run["status"] in ("starting", "running", "stopping")
+
+
+def _running_count():
+    return sum(1 for run in _runs.values() if _is_running(run))
 
 
 def _summary(run, since=0):
@@ -182,13 +220,17 @@ def _summary(run, since=0):
         "line_count": run["line_count"],
         # Where the browser can watch it, while it runs (None = not in the browser)
         "viewer": run["viewer"] if run["status"] in ("running", "stopping") else None,
+        "server_running": _running_count(),
+        "server_max": max_running(),
     }
 
 
 @router.get("")
-def list_simulations():
+def list_simulations(request: Request):
+    owner = _owner(request)
     with _lock:
-        running = _run["id"] if _is_running() else None
+        mine = _runs.get(owner)
+        running = mine["id"] if _is_running(mine) else None
     missing = virtual_screen.missing_requirements()
     return [
         {"id": sim_id, "title": sim["title"], "description": sim["description"],
@@ -201,19 +243,21 @@ def list_simulations():
 
 
 @router.get("/run")
-def current_run(since: int = 0):
+def current_run(request: Request, since: int = 0):
     # The page polls this. `since` = how many lines it already has, so it
-    # only gets the new ones.
+    # only gets the new ones. Each session only ever sees its own run.
+    owner = _owner(request)
     with _lock:
-        return {"run": _summary(_run, since)}
+        return {"run": _summary(_runs.get(owner), since)}
 
 
 @router.post("/{sim_id}/start")
-def start_simulation(sim_id: str, where: str = "browser"):
-    # where: "browser" = window on the invisible screen, shown on the page
+def start_simulation(sim_id: str, request: Request, where: str = "browser"):
+    # where: "browser" = window on its own invisible screen, shown on the page
     #        "server"  = window on the server's own monitor
     # Only matters for interactive simulations; the others have no window.
-    global _run, _run_count
+    global _run_count
+    owner = _owner(request)
 
     if sim_id not in SIMULATIONS:
         raise HTTPException(status_code=404, detail="No simulation with that id")
@@ -228,76 +272,142 @@ def start_simulation(sim_id: str, where: str = "browser"):
                    "`conda activate habitat` works, or set DELTA_SIM_PYTHON.",
         )
 
+    in_browser = SIMULATIONS[sim_id]["interactive"] and where == "browser"
+
+    # Claim a place (and a viewer port) under the lock, then start things
+    # without holding it: the screen takes a second or two, and everyone
+    # else's page is polling in the meantime.
     with _lock:
-        if _is_running():
+        mine = _runs.get(owner)
+        if _is_running(mine):
             raise HTTPException(
                 status_code=409,
-                detail=f"{SIMULATIONS[_run['id']]['title']} is already running. Stop it first.",
+                detail=f"{SIMULATIONS[mine['id']]['title']} is already running. Stop it first.",
+            )
+        if _running_count() >= max_running():
+            raise HTTPException(
+                status_code=503,
+                detail=f"The server is already running {max_running()} simulations, "
+                       f"the most it allows at once. Try again when one finishes.",
             )
 
-        env = simulation_environment()
-
-        screen = None
-        if SIMULATIONS[sim_id]["interactive"] and where == "browser":
-            screen = virtual_screen.VirtualScreen()
-            try:
-                screen.start()
-            except RuntimeError as error:
-                raise HTTPException(status_code=503, detail=f"Could not show it in the browser: {error}")
-            env = screen.environment(env)
-
-        try:
-            process = subprocess.Popen(
-                command + [SIMULATIONS[sim_id]["script"]],
-                cwd=SIMULATION_DIR,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                errors="replace",
-                bufsize=1,
-                # Own process group, so Stop also kills what `conda run` started
-                start_new_session=(os.name == "posix"),
-            )
-        except OSError as error:
-            if screen:
-                screen.stop()
-            raise HTTPException(status_code=500, detail=f"Could not start the simulation: {error}")
+        port = None
+        if in_browser:
+            taken = {run["port"] for run in _runs.values() if _is_running(run) and run["port"]}
+            port = next((p for p in viewer_ports() if p not in taken), None)
+            if port is None:  # can't happen while ports == max_running, but be safe
+                raise HTTPException(status_code=503, detail="No free viewer port. Try again shortly.")
 
         _run_count += 1
-        _run = {
+        run = {
             "number": _run_count,
             "id": sim_id,
-            "process": process,
-            "status": "running",
+            "process": None,
+            "status": "starting",
             "exit_code": None,
             "started_at": _now(),
             "ended_at": None,
             "lines": deque(maxlen=MAX_LINES),
             "line_count": 0,
-            "screen": screen,
-            "viewer": {"port": virtual_screen.viewer_port()} if screen else None,
+            "screen": None,
+            "port": port,
+            "viewer": None,
         }
-        threading.Thread(target=_read_output, args=(_run,), daemon=True).start()
-        return _summary(_run)
+        _runs[owner] = run
+
+    def give_up(status_code, detail):
+        with _lock:
+            if _runs.get(owner) is run:
+                del _runs[owner]
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    env = simulation_environment()
+
+    screen = None
+    if in_browser:
+        screen = virtual_screen.VirtualScreen(port)
+        try:
+            screen.start()
+        except RuntimeError as error:
+            give_up(503, f"Could not show it in the browser: {error}")
+        env = screen.environment(env)
+
+    try:
+        process = subprocess.Popen(
+            command + [SIMULATIONS[sim_id]["script"]],
+            cwd=SIMULATION_DIR,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+            # Own process group, so Stop also kills what `conda run` started
+            start_new_session=(os.name == "posix"),
+        )
+    except OSError as error:
+        if screen:
+            screen.stop()
+        give_up(500, f"Could not start the simulation: {error}")
+
+    with _lock:
+        run["process"] = process
+        run["screen"] = screen
+        run["viewer"] = {"port": port, "password": screen.password} if screen else None
+        stopped_meanwhile = run["status"] == "stopping"  # logged out while starting
+        if not stopped_meanwhile:
+            run["status"] = "running"
+    threading.Thread(target=_read_output, args=(run,), daemon=True).start()
+    if stopped_meanwhile:
+        _stop_run(run)
+
+    with _lock:
+        return _summary(run)
 
 
 @router.post("/stop")
-def stop_simulation():
+def stop_simulation(request: Request):
+    owner = _owner(request)
     with _lock:
-        if not _is_running():
+        run = _runs.get(owner)
+        if not _is_running(run):
             raise HTTPException(status_code=409, detail="Nothing is running")
-        _run["status"] = "stopping"
-        process = _run["process"]
+        if run["status"] == "starting":
+            raise HTTPException(status_code=409, detail="It is still starting. Try again in a moment.")
+        run["status"] = "stopping"
+    _stop_run(run)
+    return {"message": "Stopped"}
 
+
+def _stop_run(run):
+    process = run["process"]
     _kill(process, signal.SIGTERM)
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         _kill(process, signal.SIGKILL if os.name == "posix" else signal.SIGTERM)
 
-    return {"message": "Stopped"}
+
+def stop_for_session(token):
+    """main.py calls this when someone logs out or their login runs out:
+    their simulation stops, and its output is forgotten once it has."""
+    with _lock:
+        run = _runs.get(token)
+        if run is None:
+            return
+        if not _is_running(run):
+            del _runs[token]
+            return
+        # Stays in _runs until it has really stopped, so its viewer port and
+        # its place on the GPU aren't handed to someone else too early.
+        # _read_output removes it then.
+        run["owner_gone"] = token
+        status = run["status"]
+        run["status"] = "stopping"
+    if status == "running":
+        threading.Thread(target=_stop_run, args=(run,), daemon=True).start()
+    # "starting": start_simulation sees "stopping" and stops it once it can
 
 
 def _kill(process, sig):
@@ -321,12 +431,12 @@ if os.name == "posix" and threading.current_thread() is threading.main_thread() 
 @atexit.register
 def stop_on_shutdown():
     # main.py calls this when uvicorn shuts down (Ctrl+C, a --reload restart,
-    # the terminal closing), so a simulation window is not left running with
+    # the terminal closing), so no simulation window is left running with
     # nothing attached to it. atexit is a backup for other ways Python exits.
     with _lock:
-        process = _run["process"] if _is_running() else None
-        screen = _run["screen"] if _run else None
-    if process:
-        _kill(process, signal.SIGTERM)
-    if screen:
-        screen.stop()
+        runs = list(_runs.values())
+    for run in runs:
+        if run["process"] and run["process"].poll() is None:
+            _kill(run["process"], signal.SIGTERM)
+        if run["screen"]:
+            run["screen"].stop()

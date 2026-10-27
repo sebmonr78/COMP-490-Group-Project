@@ -1,0 +1,14 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+  {"wait": 3},
+  {"turn": 360},
+  {"roam": 4},
+  {"score_rooms": "rooms_half"},
+  {"roam": 4},
+  {"turn": 360},
+  {"score_rooms": "rooms_end"},
+  {"score": "rooms_map"},
+  {"screenshot": "rooms"},
+  {"wait": 2},
+  {"quit": true}
+]

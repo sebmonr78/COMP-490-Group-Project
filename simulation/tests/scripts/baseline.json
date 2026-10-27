@@ -1,0 +1,10 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+  {"wait": 3},
+  {"turn": 360},
+  {"score": "baseline_after_spin"},
+  {"roam": 3},
+  {"score": "baseline_after_roam"},
+  {"wait": 2},
+  {"quit": true}
+]

@@ -1,0 +1,26 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+  {"wait": 3},
+  {"turn": 360},
+  {"score": "flight_1_ground"},
+
+  {"fly": 0.6},
+  {"wait": 2},
+  {"turn": 180},
+  {"walk": 3},
+  {"fly": 1.4},
+  {"wait": 2},
+  {"turn": 180},
+  {"walk": 3},
+  {"score": "flight_2_air"},
+
+  {"fly": 0.3},
+  {"land": true},
+  {"wait": 2},
+  {"walk": 3},
+  {"turn": 90},
+  {"walk": 3},
+  {"score": "flight_3_landed"},
+  {"wait": 2},
+  {"quit": true}
+]

@@ -1,0 +1,150 @@
+{
+  "_comment": [
+    "The drone's camera rig, as hardware. Every number here is a measurement",
+    "or a stand-in for one -- nothing in delta/rig.py hard-codes a camera.",
+    "",
+    "Ported from the glasses project. Same baseboard, same sensors, different",
+    "mounting: these two lenses sit inside a 30 cm sphere on a gimbal that",
+    "keeps them level while the shell rolls.",
+    "",
+    "Frame: the sensor head's own frame. Origin at the centre of the sphere,",
+    "+x right, +y up, -z forward. Habitat's convention.",
+    "",
+    "yaw is degrees, POSITIVE IS LEFT.",
+    "pitch is degrees, POSITIVE IS DOWN.",
+    "hfov is HORIZONTAL degrees; pixels are square, so fx == fy."
+  ],
+
+  "hardware": {
+    "baseboard": "Luxonis OAK-FFC-4P",
+    "camera_module": "OAK-FFC-AR0234-M12",
+    "sensor": "AR0234, colour global shutter, 1920x1200, M12 mount",
+    "lens": "PENDING -- M12, target ~120 HFOV, not the stock lens",
+    "gimbal": "PENDING -- 2-axis, holds the pair level as the shell rolls"
+  },
+
+  "capture": {
+    "width": 1920,
+    "height": 1200,
+    "_comment": "Native AR0234. 16:10."
+  },
+
+  "process": {
+    "width": 960,
+    "height": 600,
+    "_comment": [
+      "What stereo actually runs on. Deliberately separate from capture:",
+      "SGBM cost scales with pixels x disparity range."
+    ]
+  },
+
+  "measured": {
+    "baseline": 0.08,
+    "baseline_status": [
+      "ASSUMED. Reduced from the glasses' 12 cm: the whole drone is 30 cm",
+      "across, and the pair has to fit inside it with gimbal clearance.",
+      "The cost is real and worth knowing -- depth error grows as the",
+      "baseline shrinks, so 8 cm is about 1.5x the range error of 12 cm at",
+      "the same distance. Measure centre-to-centre once the frame is printed."
+    ],
+    "hfov": 120.0,
+    "hfov_status": "TARGET -- measure what the lens actually gives",
+    "pitch": 0.0,
+    "pitch_status": [
+      "How the pair is MOUNTED on the gimbal: level, 0. Leave it at 0.",
+      "",
+      "Looking up and down is the gimbal's job, not the mount's. Its second",
+      "axis tilts the cameras (I and K in the window, up to 60 degrees either",
+      "way), the IMU rides the gimbal and reports the tilt, and the brain",
+      "turns every point back into a level frame with it -- the floor finder,",
+      "the ceiling finder, the map, and RTAB-Map (bridge.cpp, flag 4).",
+      "",
+      "(The first port's SGBM floor finder could not do that, which is why",
+      "this note once said the cameras must stay level. That code is gone.)"
+    ]
+  },
+
+  "cameras": [
+    {
+      "name": "left",
+      "x": -0.5,
+      "y": 0.0,
+      "z": 0.0,
+      "yaw": 0.0,
+      "pitch": null,
+      "hfov": null,
+      "_comment": "x is in BASELINES: -0.5 and +0.5 are one baseline apart."
+    },
+    {
+      "name": "right",
+      "x": 0.5,
+      "y": 0.0,
+      "z": 0.0,
+      "yaw": 0.0,
+      "pitch": null,
+      "hfov": null
+    }
+  ],
+
+  "stereo_pair": ["left", "right"],
+
+  "rangefinder": {
+    "_comment": [
+      "The down-facing distance sensor under the inner frame: how far below",
+      "it the nearest surface is -- the floor, or a table the drone is",
+      "flying over. The brain's altitude comes from it (delta/brain/height.py).",
+      "",
+      "Modelled on the HC-SR04 ultrasonic sensor in the parts list: 2 cm to",
+      "4 m, a cone about 15 degrees wide that answers with the NEAREST echo",
+      "in it, and about half a centimetre of noise. A VL53L1X laser ToF would",
+      "be the same numbers with a narrower cone.",
+      "",
+      "below_lens: how far under the lenses (the sphere's centre) it sits.",
+      "On the ground it is then 5 cm above the floor -- inside the 2 cm",
+      "minimum. PENDING: measure once the inner frame is printed."
+    ],
+    "type": "ultrasonic, HC-SR04 class",
+    "below_lens": 0.10,
+    "cone_degrees": 15.0,
+    "min_range": 0.02,
+    "max_range": 4.0,
+    "noise": 0.005
+  },
+
+  "distortion": {
+    "_comment": [
+      "OpenCV plumb-bob, [k1 k2 p1 p2 k3]. All zero == a perfect pinhole,",
+      "which is exactly what Habitat renders. The undistort stage runs anyway,",
+      "so that real checkerboard coefficients change this file and nothing else."
+    ],
+    "model": "plumb_bob",
+    "left": [0.0, 0.0, 0.0, 0.0, 0.0],
+    "right": [0.0, 0.0, 0.0, 0.0, 0.0]
+  },
+
+  "_future_cameras": [
+    {
+      "_comment": [
+        "A rear-facing pair, if it happens. A drone that maps by exploring",
+        "spends half its time reversing out of rooms. Move these into",
+        "'cameras' to enable them."
+      ],
+      "name": "back_left",
+      "x": -0.5,
+      "y": 0.0,
+      "z": 0.0,
+      "yaw": 180.0,
+      "pitch": null,
+      "hfov": null
+    },
+    {
+      "name": "back_right",
+      "x": 0.5,
+      "y": 0.0,
+      "z": 0.0,
+      "yaw": 180.0,
+      "pitch": null,
+      "hfov": null
+    }
+  ]
+}
