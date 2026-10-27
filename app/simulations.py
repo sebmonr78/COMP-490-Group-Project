@@ -50,6 +50,18 @@ MAX_LINES = 2000
 # "command" is run as it is -- DELTA's launcher starts its two processes, the
 # brain (env `brain`) and the window (env `habitat`), itself.
 SIMULATIONS = {
+    "open-environment": {
+        "title": "Drive the drone (interactive)",
+        "script": "demo/open_environment.py",
+        # Its "(new)" buttons start this one instead: the page shows DELTA as
+        # a second pair of buttons on this row, not as a row of its own.
+        "newer": "delta",
+        "description": "(new): DELTA as it is now -- the drone and its brain, every panel, the "
+                       "2D map, the rooms and the 3D replica. Without (new): the first demo, the "
+                       "drone next to the true layout, no brain. Click the window before using "
+                       "the keys.",
+        "interactive": True,
+    },
     "delta": {
         "title": "DELTA (interactive)",
         "command": ["bash", "run_drone.sh", "--fresh", "--depth", "oracle"],
@@ -65,13 +77,6 @@ SIMULATIONS = {
         "description": "The brain's 21 checks: that it cannot cheat (no Habitat, only what "
                        "real sensors measure), and its map, rooms, replica and height.",
         "interactive": False,
-    },
-    "open-environment": {
-        "title": "Simple drive (the first demo, no brain)",
-        "script": "demo/open_environment.py",
-        "description": "Opens the HSSD house and lets you drive the drone next to the true "
-                       "layout -- no brain, no mapping.",
-        "interactive": True,
     },
     "drone-tests": {
         "title": "Drone tests",
@@ -211,6 +216,7 @@ def list_simulations():
     return [
         {"id": sim_id, "title": sim["title"], "description": sim["description"],
          "interactive": sim["interactive"], "running": sim_id == running,
+         "newer": sim.get("newer"),
          # Can it be shown in the browser? If not, why not.
          "browser_ready": sim["interactive"] and not missing,
          "browser_missing": missing if sim["interactive"] else []}

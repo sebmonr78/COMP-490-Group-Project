@@ -280,7 +280,14 @@
         const sims = await response.json();
 
         rows.innerHTML = "";
+
+        // A simulation another one names as its "newer" is shown as that
+        // one's "(new)" buttons, not as a row of its own.
+        const newer = new Set(sims.map(sim => sim.newer).filter(Boolean));
+
         for (const sim of sims) {
+          if (newer.has(sim.id)) continue;
+
           const row = document.createElement("tr");
 
           const info = document.createElement("td");
@@ -296,18 +303,23 @@
           buttons.className = "sim-buttons";
           buttonCell.appendChild(buttons);
 
-          // Simulations with a window get a choice of where it opens
+          // Simulations with a window get a choice of where it opens; one
+          // with a newer version gets that version's pair first, "(new)".
           const choices = sim.interactive
-            ? [["Run in browser", "browser"], ["Run on server", "server"]]
-            : [["Run", "server"]];
+            ? [["Run in browser", "browser", sim.id], ["Run on server", "server", sim.id]]
+            : [["Run", "server", sim.id]];
 
-          for (const [label, where] of choices) {
+          if (sim.newer) {
+            choices.unshift(["Run in browser (new)", "browser", sim.newer], ["Run on server (new)", "server", sim.newer]);
+          }
+
+          for (const [label, where, id] of choices) {
             const button = document.createElement("button");
             button.textContent = label;
             button.className = "sim-start" + (where === "server" && sim.interactive ? " secondary" : "");
             button.dataset.where = where;
             button.dataset.browserReady = String(sim.browser_ready);
-            button.addEventListener("click", () => startSimulation(sim.id, where));
+            button.addEventListener("click", () => startSimulation(id, where));
             buttons.appendChild(button);
           }
 
