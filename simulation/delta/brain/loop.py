@@ -1,0 +1,1018 @@
+"""The brain's loops: localize, map, publish. Nothing else.
+
+This is the Spatial Memory Glasses brain with the glasses' other jobs taken
+out. That project's brain also detected objects with YOLOE, warned a blind
+wearer about obstacles with a fast SGBM loop, spoke directions through Piper,
+and answered spoken requests through Gemma. DELTA does none of that, so none
+of it is here -- but every part that the mapping depends on is the same file
+it was there, unchanged:
+
+    rectify.py      line the stereo pair up
+    localize.py     RTAB-Map, through its C++ bridge, with loop closure
+    depth.py        Depth Anything 3, scaled by the floor it can see
+    occupancy.py    the map, as log-odds per cell per height band
+    planner.py      A* across the map the drone built
+    navmap.py       the map, inflated for planning
+    map_localize.py checking RTAB-Map's pose against the map
+
+Three loops, and each takes the NEWEST frame when it is ready for one, so a
+slow loop falls behind by skipping frames rather than by queueing them:
+
+    localization    every frame, CPU     the RTAB-Map bridge, inside localize
+    perception      newest frame, GPU    rectify -> DA3 -> the map, at the
+                                         frame's pose
+    publisher       4 times a second     what the brain knows, to the window
+
+One lock guards what the loops share: the grid and the route.
+"""
+
+import json
+import math
+import os
+import queue
+import shutil
+import threading
+import time
+import traceback
+from collections import deque
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from delta import frames
+from delta.brain import (
+    cameras,
+    config,
+    depth as depth_module,
+    height as height_module,
+    localize,
+    map_localize,
+    navmap,
+    occupancy,
+    planner,
+    rectify,
+    replica as replica_module,
+    resources as resources_module,
+    rooms as rooms_module,
+)
+from delta.wire import Closed
+
+
+@dataclass
+class View:
+    """The last frame perception finished, for the window."""
+
+    frame: int = -1
+    depth: object = None
+    pose: object = None
+    size: tuple = (0, 0)
+
+
+@dataclass
+class Route:
+    points: list = field(default_factory=list)
+    target: tuple = (0.0, 0.0)
+    label: str = ""
+    index: int = 0
+
+
+class Latest:
+    """A one-slot mailbox: whoever reads it gets the newest thing in it."""
+
+    def __init__(self):
+        self.item = None
+        self.frame_id = -1
+        self._new = threading.Condition()
+
+    def put(self, frame_id, item):
+        with self._new:
+            self.item = item
+            self.frame_id = frame_id
+            self._new.notify_all()
+
+    def newer_than(self, frame_id, timeout=0.5):
+        with self._new:
+            if self.frame_id <= frame_id:
+                self._new.wait(timeout)
+
+            return self.item if self.frame_id > frame_id else None
+
+
+class Rate:
+    """How often something is happening, smoothed."""
+
+    def __init__(self):
+        self.value = 0.0
+        self._last = None
+
+    def tick(self):
+        now = time.monotonic()
+
+        if self._last is not None:
+            gap = now - self._last
+
+            if gap > 0:
+                self.value += 0.2 * (1.0 / gap - self.value)
+
+        self._last = now
+
+
+class Brain:
+    def __init__(self, link, hello, settings, rig):
+        self.link = link
+        self.settings = settings
+        self.rig = rig
+        self.lock = threading.RLock()
+        self.running = True
+
+        self.scene = hello["scene_id"]
+        self.size = (int(hello["width"]), int(hello["height"]))
+        self.pose_source = hello.get("pose", "rtabmap")
+        self.depth_source = hello.get("depth", "da3")
+
+        # How high the lenses sit above the floor. For the glasses this was a
+        # standing adult; for DELTA it is the drone's own radius, because the
+        # cameras sit at the centre of the sphere. The sim sends it, since the
+        # sim is what knows how big the drone is.
+        self.lens_height = float(
+            hello.get("lens_height") or settings.drone.lens_height
+        )
+
+        # While it flies, the lenses rise with it, and every height the map
+        # records is measured from the lens. The brain works out how high it
+        # is from its own rangefinder (height.py); "oracle" takes Habitat's
+        # true altitude instead, to measure what the estimate costs.
+        self.altitude_source = hello.get("altitude", "rangefinder")
+        self.height = height_module.Height(
+            self.lens_height,
+            (rig.rangefinder or {}).get("below_lens", 0.10),
+            settings.drone.max_climb_speed,
+        )
+        self.altitude = 0.0
+        self.altitude_frame = None
+
+        self.use_tilt = bool(hello.get("use_tilt", True))
+        self.map_localize = bool(hello.get("map_localize", False))
+        # Build the replica as it goes, or only when asked (brain.json, or
+        # the window's --replica).
+        self.replica_live = bool(hello.get("replica_live", settings.replica.live))
+        self.corrector = None
+
+        self.memory_dir = (
+            config.path(settings.memory.directory) / self.scene / self.pose_source
+        )
+        self._prepare_memory(fresh=hello.get("fresh", False))
+
+        self.latest = Latest()
+        self.view = View()
+        self.grid = None
+        self.route = None
+
+        # The map cut into rooms (rooms.py): (fields, labels), redone every
+        # rooms.every_seconds.
+        self._rooms = None
+        self._rooms_at = 0.0
+
+        # The place in 3D and colour (replica.py), built on its own thread.
+        self.replica = replica_module.Replica(settings.replica)
+        self._replica_jobs = queue.Queue()
+        self._chores = queue.Queue()        # slow occasional jobs (_do_chores)
+        self._chores_waiting = set()        # ...and which kinds are queued or running
+        self._saving = threading.Lock()     # one save at a time: the autosave, or the last one
+        self._replica_sent = -1
+        self._replica_at = 0.0
+        self.ceiling = None            # replica.Ceiling, once one is seen
+
+        self.rates = {name: Rate() for name in ("frames", "perception")}
+        self.usage = resources_module.Usage()
+        self._resources = {}
+        self._resources_at = 0.0
+        self.timing = {}
+        self.epoch = 0
+        self.last_stamp = 0.0
+        self.graph_dirty = False
+        self._rebuilt_at = 0.0
+
+        self.rectifier = rectify.Rectifier(rig, self.size)
+        self._load_models(hello)
+        self._load_memory()
+
+    # -----------------------------------------------------------------
+    # Startup
+    # -----------------------------------------------------------------
+
+    def _load_models(self, hello):
+        s = self.settings
+
+        self.status(f"Starting localization ({self.pose_source})...")
+
+        if self.pose_source == "oracle":
+            self.localizer = localize.OracleLocalizer()
+        else:
+            self.localizer = localize.RtabmapLocalizer(
+                s.localization,
+                self.rectifier,
+                self.size,
+                database=self.memory_dir / "rtabmap.db",
+                log=self.memory_dir / "rtabmap.log",
+                on_graph=self._on_graph,
+            )
+            self.localizer.use_tilt = self.use_tilt
+
+        if self.map_localize:
+            self.corrector = map_localize.MapCorrector(self._body)
+            publish = self.localizer.fixes.add
+
+            def corrected(fix):
+                if fix.pose is not None:
+                    fix.raw_pose = fix.pose
+                    fix.pose = self.corrector.apply(fix.pose)
+
+                publish(fix)
+
+            self.localizer.fixes.add = corrected
+
+        self.status(f"Loading depth ({self.depth_source})...")
+
+        if self.depth_source == "oracle":
+            self.depth = depth_module.OracleDepth()
+        else:
+            self.depth = depth_module.DA3Depth(s.depth, self.rectifier.baseline)
+
+        # The floor fixes Depth Anything's missing scale. True depth has none
+        # missing: rescaling it can only add error -- with a wrong height it
+        # once stretched every distance by 1.58.
+        self.floor = depth_module.FloorScale(
+            self.lens_height,
+            enabled=s.depth.scale_from_floor and self.depth_source != "oracle",
+        )
+
+        if self.depth_source != "oracle":
+            self.status("Warming up Depth Anything...")
+
+            blank = np.zeros((self.size[1], self.size[0], 3), np.uint8)
+            pair = rectify.RectifiedPair(
+                blank, blank, self.rectifier.K, self.rectifier.baseline
+            )
+            self.depth.estimate(pair)
+
+        self.status("Brain ready.")
+
+    def _prepare_memory(self, fresh):
+        if fresh and self.memory_dir.exists():
+            previous = self.memory_dir.with_name(self.memory_dir.name + ".previous")
+            shutil.rmtree(previous, ignore_errors=True)
+            self.memory_dir.rename(previous)
+
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_memory(self):
+        """Pick up last session's map, if there is one.
+
+        This is the proposal's persistent digital representation in its
+        simplest form: the drone is meant to come back and compare, and it
+        cannot compare against something it threw away at exit.
+        """
+        meta_path = self.memory_dir / "meta.json"
+        self.saved_root_map = None
+
+        if not meta_path.exists():
+            return
+
+        meta = json.loads(meta_path.read_text())
+
+        if (self.memory_dir / "grid.npz").exists():
+            self.grid = occupancy.OccupancyGrid(self.settings.occupancy, (0.0, 0.0))
+            self.grid.load(self.memory_dir / "grid.npz")
+
+        if (self.memory_dir / "replica.npz").exists():
+            self.replica.load(self.memory_dir / "replica.npz")
+
+        # With RTAB-Map, what was saved is in LAST session's map frame. Until
+        # RTAB-Map recognises somewhere from it, this session's poses are in a
+        # different frame and must not be written into the old map.
+        if self.pose_source == "rtabmap":
+            self.saved_root_map = meta.get("root_map", 0)
+
+        self.status(
+            f"Remembered a map from {meta.get('saved', 'last time')}; "
+            "looking for somewhere I recognise."
+        )
+
+    def save(self, final=True):
+        """Write the brain's memory to disk.
+
+        `final` is the save at the end (or on Tab): the 3D replica is built
+        if it was not built as it went, and written as a .ply too. The
+        autosave every 30 s writes only what is needed to come back -- it
+        used to rebuild the replica and write the .ply every time, and to
+        compress the map while holding the lock perception needs: a stall
+        every 30 s.
+        """
+        with self._saving:
+            self._save(final)
+
+    def _save(self, final):
+        started = time.monotonic()
+
+        # The replica's views, to rebuild it from, and the replica itself as
+        # a coloured point cloud any 3D viewer opens (MeshLab, CloudCompare).
+        if self.replica.views:
+            if final and not self.replica_live:
+                self.replica.rebuild(dict(self.localizer.node_poses))
+
+            self.replica.save(self.memory_dir / "replica.npz")
+
+            if final:
+                self.replica.save_ply(self.memory_dir / "replica.ply")
+
+        # A copy under the lock; the slow part, compressing, outside it.
+        with self.lock:
+            grid = self.grid.snapshot() if self.grid is not None else None
+
+        if grid is not None:
+            grid.save(self.memory_dir / "grid.npz")
+
+        with self.lock:
+            latest = self.localizer.fixes.latest
+
+            if self.saved_root_map is not None:
+                root_map = self.saved_root_map
+            else:
+                root_map = max(0, latest.root_map) if latest is not None else 0
+
+            meta = {
+                "scene": self.scene,
+                "pose": self.pose_source,
+                "root_map": root_map,
+                "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+            (self.memory_dir / "meta.json").write_text(json.dumps(meta, indent=1))
+
+        self.timing["save"] = (time.monotonic() - started) * 1000.0
+
+    # -----------------------------------------------------------------
+    # Running
+    # -----------------------------------------------------------------
+
+    def run(self):
+        """Serve the sim until it disconnects, then save and stop."""
+        for loop in (self._perceive, self._publish, self._build_replica, self._do_chores):
+            threading.Thread(
+                target=self._guarded(loop), daemon=True, name=loop.__name__
+            ).start()
+
+        self.link.send("ready", {})
+
+        try:
+            while self.running:
+                message = self.link.receive()
+
+                if message.kind == "frame":
+                    self._on_frame(message)
+                elif message.kind == "command":
+                    # A command that fails -- a route that cannot be
+                    # planned -- is reported, never allowed to end the
+                    # brain. One did: a click on the map read a settings
+                    # section that did not exist, and took localization
+                    # and the map down with it.
+                    try:
+                        self._command(message.fields.get("name", ""), message.fields)
+                    except Exception as error:
+                        traceback.print_exc()
+                        self.status(f"Could not do '{message.fields.get('name', '')}': {error!r}")
+                elif message.kind == "bye":
+                    break
+
+        except Closed:
+            pass
+
+        finally:
+            self.running = False
+            self.status("Saving the map...")
+            self.save()
+            self.localizer.close()
+            self.link.close()
+            print("Brain stopped; map saved to", self.memory_dir, flush=True)
+
+    def _guarded(self, loop):
+        def run():
+            while self.running:
+                try:
+                    loop()
+                    return
+                except Closed:
+                    return
+                except Exception as error:
+                    traceback.print_exc()
+                    self.status(f"{loop.__name__} failed: {error!r}; restarting it")
+                    time.sleep(1.0)
+
+        return run
+
+    def _on_frame(self, message):
+        frame = cameras.from_message(message)
+        pair = self.rectifier(frame)
+
+        # While flying, the lenses are the altitude higher above the floor.
+        # Worked out on every frame, in order, before anything else looks at
+        # it, and kept with the frame so the map uses the height of the moment
+        # the picture was taken rather than of whenever it gets round to it.
+        if self.altitude_source == "oracle" and frame.true_altitude is not None:
+            self.altitude = float(frame.true_altitude)
+        else:
+            self.altitude = self.height.update(frame.range_down, frame.stamp, frame.climb_rate)
+
+        frame.altitude = self.altitude
+        self.altitude_frame = frame.id
+
+        self.localizer.submit(frame, pair)
+        self.latest.put(frame.id, (frame, pair))
+        self.last_stamp = frame.stamp
+        self.rates["frames"].tick()
+
+    def _command(self, name, fields=None):
+        fields = fields or {}
+
+        if name == "plan":
+            self._plan(tuple(fields["xy"]), fields.get("label", "there"))
+        elif name == "clear":
+            with self.lock:
+                self.route = None
+        elif name == "save":
+            self.save()
+            self.status("Map saved.")
+        elif name == "build_replica":
+            # Every kept view at where the map now puts it -- a rebuild, on
+            # the replica's own thread; sent when done.
+            self._replica_jobs.put(("rebuild", None, dict(self.localizer.node_poses)))
+            self.status(f"Building the 3D replica from {len(self.replica.views)} views.")
+
+    # -----------------------------------------------------------------
+    # Where the drone is
+    # -----------------------------------------------------------------
+
+    def _body(self, lens_pose):
+        """The drone's centre and heading, from the left lens's pose.
+
+        The lens sits half a baseline to the left of the sphere's centre, so
+        the centre is half a baseline to its right. The glasses also had to
+        step back from the lens to the middle of a head; a sphere's centre is
+        the lens's own position, so that term is gone.
+        """
+        x, y, yaw = frames.planar(lens_pose)
+        right = self.rectifier.baseline / 2.0
+
+        return (x + right * math.sin(yaw), y - right * math.cos(yaw)), yaw
+
+    def _footprint(self):
+        """The drone as a circle in the base frame of the left lens."""
+        return (
+            0.0,
+            -self.rectifier.baseline / 2.0,
+            float(self.settings.drone.radius),
+        )
+
+    def _localized(self, fix):
+        """False while a saved map has not been recognised yet."""
+        if self.saved_root_map is None:
+            return True
+
+        if fix.root_map == self.saved_root_map:
+            self.saved_root_map = None
+            self.epoch += 1
+            self.status("I know where we are.")
+            return True
+
+        if not hasattr(self, "_waiting_since"):
+            self._waiting_since = time.monotonic()
+
+        waited = time.monotonic() - self._waiting_since
+
+        if waited > float(self.settings.localization.relocalize_within):
+            self.saved_root_map = None
+            self.epoch += 1
+
+            # Kept, not deleted: RTAB-Map may still recognise it later.
+            for name in ("grid.npz", "meta.json"):
+                saved = self.memory_dir / name
+
+                if saved.exists():
+                    saved.rename(saved.with_name(saved.name + ".unrecognised"))
+
+            with self.lock:
+                self.grid = None
+
+            self.replica.reset()
+            self.ceiling = None
+            self.status("I don't recognise this place; starting a new map.")
+            return True
+
+        return False
+
+    def _on_graph(self, poses):
+        self.graph_dirty = True
+
+    def _apply_graph(self):
+        """Redraw the map after a loop closure.
+
+        This is what RTAB-Map buys that plain odometry cannot: when it
+        recognises somewhere it has been, it corrects every pose behind it,
+        and the kept scans are redrawn at the corrected poses. Without it, a
+        circuit of a house leaves two copies of every wall.
+
+        At most every few seconds -- closures arrive in bursts, and redrawing
+        a long drive takes a moment.
+        """
+        if not self.graph_dirty or time.monotonic() - self._rebuilt_at < 3.0:
+            return
+
+        self.graph_dirty = False
+        self._rebuilt_at = time.monotonic()
+        poses = dict(self.localizer.node_poses)
+
+        with self.lock:
+            if self.corrector is not None:
+                self.corrector.reset()
+
+            if self.grid is not None:
+                self.grid.rebuild(poses)
+
+        # Built only when asked for, the replica is not redrawn either.
+        if self.replica_live:
+            self._replica_jobs.put(("rebuild", None, poses))
+
+    def _chore(self, kind, *args):
+        """Queue a slow job for _do_chores, unless one of its kind is queued."""
+        if kind not in self._chores_waiting:
+            self._chores_waiting.add(kind)
+            self._chores.put((kind, args))
+
+    def _do_chores(self):
+        """The brain's slow, occasional jobs, on a thread of their own: the
+        autosave (1-1.3 s) and splitting the map into rooms (50-90 ms).
+
+        Done on the publishing thread, they stopped the window hearing from
+        the brain while they ran: the map and the drone's mark froze for
+        over a second every 30 s. Rooms are a view of the map, not something
+        the drone needs to keep flying: a failure is logged and skipped.
+        """
+        while self.running:
+            try:
+                kind, args = self._chores.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            try:
+                if kind == "save":
+                    self.save(final=False)
+                elif kind == "rooms":
+                    self._split_rooms(*args)
+            except Exception as error:
+                traceback.print_exc()
+                self.status(f"{'Saving' if kind == 'save' else 'Splitting rooms'} failed: {error!r}")
+            finally:
+                self._chores_waiting.discard(kind)
+
+    def _build_replica(self):
+        """The replica's own thread: add views as they come, rebuild after a
+        loop closure. A rebuild of a long drive takes seconds; done here, it
+        never holds up perception. Of several rebuilds queued, only the
+        newest is done."""
+        while self.running:
+            try:
+                job, view, pose = self._replica_jobs.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            started = time.monotonic()
+
+            if job == "add" and not self.replica_live:
+                self.replica.keep(view)
+            elif job == "add":
+                self.replica.add(view, pose)
+                self.timing.update(replica_add=(time.monotonic() - started) * 1000.0)
+            else:
+                while True:
+                    try:
+                        newer = self._replica_jobs.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    if newer[0] == "add":
+                        self.replica.keep(newer[1])
+                    else:
+                        pose = newer[2]
+
+                self.replica.rebuild(pose)
+                self.timing.update(replica_rebuild=(time.monotonic() - started) * 1000.0)
+
+    # -----------------------------------------------------------------
+    # The perception loop
+    # -----------------------------------------------------------------
+
+    def _perceive(self):
+        last = -1
+
+        while self.running:
+            item = self.latest.newer_than(last)
+
+            if item is None:
+                continue
+
+            frame, pair = item
+            last = frame.id
+
+            fix = self.localizer.fix(frame.id, timeout=2.0)
+
+            if fix is None or not fix.ok or not self._localized(fix):
+                continue
+
+            # The lens height the map measures from. On the ground it is the
+            # drone's radius; airborne, it is that plus however high it is.
+            altitude = self.altitude if frame.altitude is None else frame.altitude
+            lens_height = self.lens_height + altitude
+
+            started = time.monotonic()
+            depth_map = self.depth.estimate(pair, frame)
+            measured = time.monotonic()
+
+            tilt = self._tilt(frame)
+            tilted = fix.pose.copy()
+
+            if tilt is not None:
+                tilted[:3, :3] = fix.pose[:3, :3] @ tilt
+
+            self.floor.lens_height = lens_height
+            scale = self.floor.update(depth_map, frames.world_from_optical(tilted))
+            floor_seen = scale is not None
+
+            # No floor in view: borrow the recent scale for what is close, and
+            # declare nothing free.
+            if scale is None:
+                scale = 1.0 if self.depth_source == "oracle" else self.floor.fallback()
+
+            if scale is None:
+                continue
+
+            depth_map.depth = depth_map.depth * scale
+            depth_map.scale = scale
+
+            scan = occupancy.make_scan(
+                depth_map.depth,
+                depth_map.K,
+                lens_height,
+                self.settings.occupancy,
+                self._footprint(),
+                fix.anchor,
+                fix.anchor_from_base,
+                free_space=floor_seen or self.depth_source == "oracle",
+                tilt=tilt,
+                # On the ground the drone's own footprint is known free. In
+                # the air it is not: there may be nothing under it at all.
+                footprint_free=altitude < 0.05,
+            )
+
+            with self.lock:
+                pose = fix.pose
+
+                if self.corrector is not None:
+                    pose = getattr(fix, "raw_pose", fix.pose)
+
+                    if floor_seen and self.grid is not None:
+                        self.corrector.update(self.grid, scan.hits, pose)
+
+                if self.grid is None:
+                    self.grid = occupancy.OccupancyGrid(
+                        self.settings.occupancy, pose[:2, 3]
+                    )
+
+                kept = len(self.grid.scans)
+                self.grid.add(scan, pose)
+
+                self.view = View(frame.id, depth_map, pose, frame.size)
+
+            # A view the map kept is a view for the replica too: its surface
+            # points in colour, added by the replica's own thread.
+            if len(self.grid.scans) > kept:
+                viewed = time.monotonic()
+                self._replica_jobs.put(("add", replica_module.make_view(
+                    depth_map.depth, depth_map.K, pair.left, lens_height, self.settings.replica,
+                    fix.anchor, fix.anchor_from_base, tilt=tilt,
+                ), pose))
+                self.timing.update(replica_view=(time.monotonic() - viewed) * 1000.0)
+
+            self.timing.update(
+                depth=(measured - started) * 1000.0,
+                map=(time.monotonic() - measured) * 1000.0,
+            )
+            self.rates["perception"].tick()
+
+            self._apply_graph()
+
+    def _tilt(self, frame):
+        """This frame's camera tilt as a rotation, or None for level.
+
+        From the IMU's gravity reading, exactly as the glasses did it. For
+        DELTA the gimbal holds the lenses level, so the true tilt is zero and
+        what arrives is only the chip's own error -- but it is still applied,
+        because on real hardware the gimbal will not be perfect, and because
+        heights in the map are read straight off the image rows: half a degree
+        of unnoticed tilt lifts a point 3 m away by 2.6 cm.
+        """
+        if not self.use_tilt or (frame.imu_pitch is None and frame.imu_roll is None):
+            return None
+
+        return frames.level_from_tilted(frame.imu_pitch or 0.0, frame.imu_roll or 0.0)
+
+    # -----------------------------------------------------------------
+    # Planning on the map the drone built
+    # -----------------------------------------------------------------
+
+    def _plan(self, target_xy, label):
+        with self.lock:
+            if self.grid is None:
+                self.status("Nothing mapped yet.")
+                return
+
+            fix = self.localizer.fixes.latest
+
+            if fix is None or fix.pose is None:
+                self.status("I do not know where I am yet.")
+                return
+
+            here, _ = self._body(fix.pose)
+
+            nav = navmap.build(
+                self.grid,
+                self.settings.navigation,
+                wearer_xy=here,
+                wearer_radius=float(self.settings.drone.radius),
+            )
+
+            if nav is None:
+                self.status("Nothing mapped yet.")
+                return
+
+            points = planner.plan(nav, here, target_xy)
+
+            if not points:
+                self.status(f"No route to {label} through what I have mapped.")
+                self.route = None
+                return
+
+            self.route = Route(points=points, target=tuple(target_xy), label=label)
+
+            length = sum(
+                math.dist(a, b) for a, b in zip(points, points[1:])
+            )
+            self.status(f"Route to {label}: {length:.1f} m, {len(points)} corners.")
+
+    # -----------------------------------------------------------------
+    # Telling the window what it knows
+    # -----------------------------------------------------------------
+
+    def status(self, text):
+        print(text, flush=True)
+
+        try:
+            self.link.send("status", {"text": text})
+        except Closed:
+            pass
+
+    def _publish(self):
+        saved_at = time.monotonic()
+        every = float(self.settings.memory.get("autosave_seconds", 30.0))
+
+        while self.running:
+            # Ten times a second -- as often as the cameras give it frames: the
+            # window's drone marker and depth picture follow the brain at this
+            # rate, and at 4 a second they jumped.
+            time.sleep(0.1)
+
+            # Save as it goes, not only on the way out. The map used to be
+            # written once, when the sim disconnected -- so a crash, a killed
+            # terminal or a closed laptop lost the whole session's work, and
+            # the drone that is supposed to come back and compare had nothing
+            # to come back to.
+            if every > 0 and time.monotonic() - saved_at >= every:
+                saved_at = time.monotonic()
+
+                if self.grid is not None:
+                    self._chore("save")
+
+            self._measure_resources()
+            started = time.monotonic()
+            fields, arrays = self._snapshot()
+
+            try:
+                self.link.send("state", fields, arrays)
+                self.timing["publish"] = (time.monotonic() - started) * 1000.0
+                self._send_replica()
+            except Closed:
+                return
+
+    def _send_replica(self):
+        """The replica, on its own and only now and then: it runs to a few
+        hundred thousand cubes, too much to send with every state. Sent as
+        whole-cube indices (int16: 1.6 km either way at 5 cm) and colours."""
+        every = float(self.settings.replica.every_seconds)
+
+        if self.replica.version == self._replica_sent or time.monotonic() - self._replica_at < every:
+            return
+
+        started = self._replica_at = time.monotonic()
+        self._replica_sent = self.replica.version
+        centres, colours = self.replica.cloud()
+        voxel = self.replica.voxel
+
+        # Nothing to send yet -- and an empty array cannot be sent at all.
+        if not len(centres):
+            return
+
+        # Where the ceiling is, patch by patch, from the same cubes: how high
+        # the drone can fly anywhere, and what the window takes off.
+        self.ceiling = replica_module.find_ceiling(centres, voxel, self.settings.replica.ceiling)
+
+        self.link.send(
+            "replica",
+            {"voxel": voxel, "epoch": self.epoch, "views": len(self.replica.views),
+             "ceiling_origin": [float(v) for v in self.ceiling.origin],
+             "ceiling_cell": self.ceiling.cell},
+            {"index": np.floor(centres / voxel).astype(np.int16), "colour": colours,
+             "ceiling": self.ceiling.heights.astype(np.float16)},
+        )
+        self.timing.update(replica_send=(time.monotonic() - started) * 1000.0)
+
+    def _measure_resources(self):
+        """Memory and CPU, every 2 s: the brain's process and RTAB-Map's,
+        and the size of what the brain keeps -- for the window."""
+        if time.monotonic() - self._resources_at < 2.0:
+            return
+
+        self._resources_at = time.monotonic()
+        bridge = getattr(getattr(self.localizer, "process", None), "pid", None)
+        megabytes = resources_module.megabytes
+
+        with self.lock:
+            grid = self.grid
+            grid_mb = 0.0 if grid is None else megabytes(grid.logodds, grid.solid, grid.walls) + sum(
+                megabytes(s.free, s.hits, s.walls, s.solid, s.solid_free) for s in grid.scans)
+            scans = 0 if grid is None else len(grid.scans)
+
+        cubes_mb, views_mb = self.replica.memory()
+        database = self.memory_dir / "rtabmap.db"
+
+        self._resources = {
+            "processes": self.usage.measure({"brain": os.getpid(), "rtabmap": bridge}),
+            "map_2d": {"mb": round(grid_mb, 1), "scans": scans},
+            "replica": {"cubes": len(self.replica), "mb": round(cubes_mb, 1),
+                        "views": len(self.replica.views), "views_mb": round(views_mb, 1)},
+            "rtabmap": {"nodes": len(getattr(self.localizer, "node_poses", None) or {}),
+                        "db_mb": round(database.stat().st_size / 1e6, 1) if database.exists() else 0.0},
+        }
+
+    def _ceiling_here(self, pose):
+        if self.ceiling is None or pose is None:
+            return None
+
+        height = self.ceiling.at((pose["x"], pose["y"]))
+        return None if height is None else round(height, 3)
+
+    def _split_rooms(self, classes, walls, corner, resolution):
+        """Cut the map into rooms (rooms.py) and keep the answer to publish.
+
+        The rooms carry their own origin: the grid's window grows between
+        splits, and the room labels must land where they were computed.
+        """
+        self._rooms_at = time.monotonic()
+        started = time.monotonic()
+
+        found = rooms_module.segment(classes, walls, resolution, self.settings.rooms)
+
+        def world(col, row):
+            return [float(corner[0] + col * resolution), float(corner[1] + row * resolution)]
+
+        fields = {
+            "origin": [float(corner[0]), float(corner[1])],
+            "resolution": resolution,
+            "shrink": round(found.shrink, 2),
+            "list": [
+                {
+                    "id": room.id, "area": round(room.area, 1), "xy": world(*room.point),
+                }
+                for room in found.rooms
+            ],
+            "doors": [
+                {"rooms": list(door.rooms), "xy": world(*door.point), "width": round(door.width, 2)}
+                for door in found.doors
+            ],
+        }
+
+        labels = found.labels.astype(np.uint8 if found.labels.max() < 256 else np.uint16)
+        self._rooms = (fields, labels)
+        self.timing.update(rooms=(time.monotonic() - started) * 1000.0)
+
+    def _snapshot(self):
+        fields = {"epoch": self.epoch}
+        arrays = {}
+
+        fix = self.localizer.fixes.latest
+
+        if fix is not None and fix.pose is not None:
+            x, y, yaw = frames.planar(fix.pose)
+            body, _ = self._body(fix.pose)
+
+            fields["pose"] = {
+                "frame": fix.frame,
+                "x": x,
+                "y": y,
+                "yaw": yaw,
+                "body": list(body),
+            }
+
+            if getattr(fix, "raw_pose", None) is not None:
+                rx, ry, ryaw = frames.planar(fix.raw_pose)
+                fields["pose"]["raw"] = [rx, ry, ryaw]
+
+        plan = None
+
+        with self.lock:
+            if self.grid is not None:
+                bounds = self.grid.known_bounds(margin=0.5)
+
+                if bounds is not None:
+                    r0, r1, c0, c1 = bounds
+
+                    arrays["grid"] = self.grid.classes()[r0:r1, c0:c1]
+                    arrays["solid"] = self.grid.solid_classes()[r0:r1, c0:c1]
+
+                    # A copy for splitting into rooms, outside the lock.
+                    if time.monotonic() - self._rooms_at >= float(self.settings.rooms.every_seconds) \
+                            and "rooms" not in self._chores_waiting:
+                        plan = (
+                            arrays["grid"], self.grid.wall_cells()[r0:r1, c0:c1].copy(),
+                            self.grid.to_world([c0, r0]), self.grid.resolution,
+                        )
+
+                    # What the drone could DO in each cell -- roll across,
+                    # roll under, fly over -- once the grid keeps height
+                    # bands. Until it does, the window falls back to the
+                    # plain free/solid classes above.
+                    if hasattr(self.grid, "moves"):
+                        arrays["moves"] = self.grid.moves(
+                            float(self.settings.drone.diameter)
+                        )[r0:r1, c0:c1]
+
+                    corner = self.grid.to_world([c0, r0])
+                    fields["grid"] = {
+                        "origin": list(corner),
+                        "resolution": self.grid.resolution,
+                    }
+
+            if self.route is not None:
+                fields["route"] = {
+                    "points": [list(p) for p in self.route.points],
+                    "label": self.route.label,
+                    "target": list(self.route.target),
+                }
+
+            view = self.view
+
+            if view.depth is not None:
+                arrays["depth"] = np.clip(
+                    view.depth.depth / 6.0 * 255.0, 0, 255
+                ).astype(np.uint8)
+
+        if plan is not None:
+            self._chore("rooms", *plan)
+
+        if self._rooms is not None:
+            fields["rooms"], arrays["rooms"] = self._rooms
+
+        fields["stats"] = {
+            "rates": {name: round(rate.value, 1) for name, rate in self.rates.items()},
+            "ms": {name: round(value) for name, value in self.timing.items()},
+            "localization": dict(self.localizer.stats),
+            "floor_scale": round(self.floor.scale, 3),
+            "lens_height": round(self.lens_height + self.altitude, 3),
+            "altitude": round(self.altitude, 3),
+            "altitude_source": self.altitude_source,
+            "altitude_frame": self.altitude_frame,
+            # What the rangefinder says is under the drone: 0 is the floor.
+            "surface_below": round(self.height.surface, 3),
+            "range_down": None if self.height.reading is None else round(self.height.reading, 3),
+            # How high the ceiling is over the drone, from the replica: None
+            # until one has been seen here.
+            "ceiling": self._ceiling_here(fields.get("pose")),
+            "map_localize": (
+                dict(self.corrector.stats) if self.corrector is not None else None
+            ),
+            "sources": {"pose": self.pose_source, "depth": self.depth_source},
+            "replica": {"live": self.replica_live, "views": len(self.replica.views)},
+            "resources": self._resources,
+            "relocalizing": self.saved_root_map is not None,
+        }
+
+        return fields, arrays

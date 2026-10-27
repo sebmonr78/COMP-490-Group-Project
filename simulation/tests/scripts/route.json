@@ -1,0 +1,12 @@
+[
+  {"wait_for": "ready", "timeout": 300},
+  {"wait": 3},
+  {"turn": 360},
+  {"turn": 180},
+  {"wait": 2},
+  {"plan_ahead": 3.0},
+  {"wait": 2},
+  {"autopilot": 25},
+  {"wait": 2},
+  {"quit": true}
+]

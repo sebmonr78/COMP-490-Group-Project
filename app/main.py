@@ -3,6 +3,7 @@ import secrets
 import sqlite3
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -23,11 +24,7 @@ async def lifespan(app):
     # simulation it started, and its in-browser screen
     simulations.stop_on_shutdown()
 
-
 app = FastAPI(lifespan=lifespan)
-
-# The Run buttons for the simulation scripts (see simulations.py)
-app.include_router(simulations.router)
 
 # folder that holds our web page (index.html)
 STATIC = Path(__file__).resolve().parent / "static"
@@ -41,10 +38,11 @@ def query(sql, params=()):
     finally:
         conn.close()
 
-# who is logged in: maps a random session token to a user_id
+# who is logged in: maps a random session token to (user_id, expires_at)
 # it lives in memory, so restarting the server logs everyone out
 SESSIONS = {}
 SESSION_COOKIE = "delta_session"
+SESSION_HOURS = 2  # how long a login lasts before you have to log in again
 
 # reset tokens waiting to be used: token --> (user_id, expires_at)
 # in memory, like SESSIONS, so a server restart forgets them
@@ -53,12 +51,32 @@ RESET_MINUTES = 15
 
 def current_user(request: Request):
     # the logged in user's id, or None if there is no valid ticket
-    return SESSIONS.get(request.cookies.get(SESSION_COOKIE))
+    token = request.cookies.get(SESSION_COOKIE)
+    entry = SESSIONS.get(token)
+    if entry is None:
+        return None
+    user_id, expires_at = entry
+    if expires_at < time.time():
+        del SESSIONS[token]        # ticket ran out, so throw it away
+        simulations.stop_for_session(token)   # and their simulation with it
+        return None
+    return user_id
 
 def require_login(request: Request):
     # used on the data endpoints: no valid ticket --> 401, no data
-    if current_user(request) is None:
-        raise HTTPException(status_code=401, detail="Log in!! These are not the drones you are looking for.")
+    # otherwise hands back the logged in user's id
+    user_id = current_user(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="You got to log in!! Your drone is in another castle.")
+    return user_id
+
+# The Run buttons for the simulation scripts (see simulations.py)
+# Has to come after require_login: the login check protects all four of its endpoints.
+# Each login session (its session cookie) gets its own simulation, so two
+# people, or one account on two devices, can each run one at the same time.
+# simulations.py reads the same cookie to tell the sessions apart.
+simulations.SESSION_COOKIE = SESSION_COOKIE
+app.include_router(simulations.router, dependencies=[Depends(require_login)])
 
 @app.get("/")
 def home():
@@ -81,22 +99,38 @@ def health():
     return {"message": "DELTA backend is running"}
 
 
-@app.get("/api/drones", dependencies=[Depends(require_login)])
-def list_drones():
-    return query("SELECT drone_id, serial_number, owner_id, status FROM Drone")
-
-
-@app.get("/api/sessions", dependencies=[Depends(require_login)])
-def list_sessions():
-    # Newest scan first
+@app.get("/api/drones")
+def list_drones(user_id: int = Depends(require_login)):
     return query(
-        "SELECT session_id, drone_id, started_at, ended_at "
-        "FROM Session ORDER BY started_at DESC"
+        "SELECT drone_id, serial_number, owner_id, status FROM Drone "
+        "WHERE owner_id = ?",
+        (user_id,),
     )
 
 
-@app.get("/api/sessions/{session_id}/changes", dependencies=[Depends(require_login)])
-def list_changes(session_id: int):
+@app.get("/api/sessions")
+def list_sessions(user_id: int = Depends(require_login)):
+    # Newest scan first, only scans made by this user's drones
+    return query(
+        "SELECT s.session_id, s.drone_id, s.started_at, s.ended_at "
+        "FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
+        "WHERE d.owner_id = ? ORDER BY s.started_at DESC",
+        (user_id,),
+    )
+
+
+@app.get("/api/sessions/{session_id}/changes")
+def list_changes(session_id: int, user_id: int = Depends(require_login)):
+    # 404 (not "forbidden") if the scan isn't theirs, so nobody can tell
+    # which scan numbers exist by guessing
+    owned = query(
+        "SELECT 1 FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
+        "WHERE s.session_id = ? AND d.owner_id = ?",
+        (session_id, user_id),
+    )
+    if not owned:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
     # LEFT JOIN keeps changes that aren't tied to a specific object
     return query(
         "SELECT c.change_id, c.change_type, c.x, c.y, c.z, c.description, "
@@ -181,15 +215,18 @@ def login(info: LoginInfo, response: Response):
 
     # correct login: give the browser a session ticket
     token = secrets.token_urlsafe(32)
-    SESSIONS[token] = rows[0]["user_id"]
-    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax")
+    SESSIONS[token] = (rows[0]["user_id"], time.time() + SESSION_HOURS * 3600)
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                        max_age=SESSION_HOURS * 3600)
 
     return {"user_id": rows[0]["user_id"], "first_name": rows[0]["first_name"]}
 
 @app.post("/api/logout")
 def logout(request: Request, response: Response):
     # Throw away the ticket on the server, then tell the browser to forget it too
-    SESSIONS.pop(request.cookies.get(SESSION_COOKIE), None)
+    token = request.cookies.get(SESSION_COOKIE)
+    SESSIONS.pop(token, None)
+    simulations.stop_for_session(token)   # their simulation stops too
     response.delete_cookie(SESSION_COOKIE)
     return {"message": "Logged out"}
 
@@ -265,7 +302,7 @@ def reset_password(info: ResetInfo):
         raise HTTPException(status_code=500, detail="Server error: could not save the new password")
 
     del RESET_TOKENS[info.token]          # a link only works once
-    for key in [k for k, u in SESSIONS.items() if u == user_id]:
+    for key in [k for k, (u, _) in SESSIONS.items() if u == user_id]:
         del SESSIONS[key]                 # log out anyone already signed in as them
     return {"message": "Password changed"}
 
