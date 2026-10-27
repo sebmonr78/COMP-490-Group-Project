@@ -26,9 +26,6 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 
-# The Run buttons for the simulation scripts (see simulations.py)
-app.include_router(simulations.router)
-
 # folder that holds our web page (index.html)
 STATIC = Path(__file__).resolve().parent / "static"
 
@@ -66,8 +63,15 @@ def current_user(request: Request):
 
 def require_login(request: Request):
     # used on the data endpoints: no valid ticket --> 401, no data
-    if current_user(request) is None:
+    # otherwise hands back the logged in user's id
+    user_id = current_user(request)
+    if user_id is None:
         raise HTTPException(status_code=401, detail="You got to log in!! Your drone is in another castle.")
+    return user_id
+
+# The Run buttons for the simulation scripts (see simulations.py)
+# Has to come after require_login: the login check protects all four of its endpoints
+app.include_router(simulations.router, dependencies=[Depends(require_login)])
 
 @app.get("/")
 def home():
@@ -90,22 +94,38 @@ def health():
     return {"message": "DELTA backend is running"}
 
 
-@app.get("/api/drones", dependencies=[Depends(require_login)])
-def list_drones():
-    return query("SELECT drone_id, serial_number, owner_id, status FROM Drone")
-
-
-@app.get("/api/sessions", dependencies=[Depends(require_login)])
-def list_sessions():
-    # Newest scan first
+@app.get("/api/drones")
+def list_drones(user_id: int = Depends(require_login)):
     return query(
-        "SELECT session_id, drone_id, started_at, ended_at "
-        "FROM Session ORDER BY started_at DESC"
+        "SELECT drone_id, serial_number, owner_id, status FROM Drone "
+        "WHERE owner_id = ?",
+        (user_id,),
     )
 
 
-@app.get("/api/sessions/{session_id}/changes", dependencies=[Depends(require_login)])
-def list_changes(session_id: int):
+@app.get("/api/sessions")
+def list_sessions(user_id: int = Depends(require_login)):
+    # Newest scan first, only scans made by this user's drones
+    return query(
+        "SELECT s.session_id, s.drone_id, s.started_at, s.ended_at "
+        "FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
+        "WHERE d.owner_id = ? ORDER BY s.started_at DESC",
+        (user_id,),
+    )
+
+
+@app.get("/api/sessions/{session_id}/changes")
+def list_changes(session_id: int, user_id: int = Depends(require_login)):
+    # 404 (not "forbidden") if the scan isn't theirs, so nobody can tell
+    # which scan numbers exist by guessing
+    owned = query(
+        "SELECT 1 FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
+        "WHERE s.session_id = ? AND d.owner_id = ?",
+        (session_id, user_id),
+    )
+    if not owned:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
     # LEFT JOIN keeps changes that aren't tied to a specific object
     return query(
         "SELECT c.change_id, c.change_type, c.x, c.y, c.z, c.description, "
