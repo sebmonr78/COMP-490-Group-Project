@@ -19,9 +19,24 @@ import sys
 # alone can turn a fitting model into an out-of-memory error.
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
+from delta.brain import config
+
+# How many threads the brain's number crunching may use: brain.json `threads`.
+# Unset, PyTorch, NumPy's BLAS and OpenCV each start one worker per hardware
+# thread -- 20 on the i9 -- and idle workers spin instead of sleeping.
+# Measured with Depth Anything: twenty threads at a steady 25% each, five cores
+# busy waiting, taken from the window beside it. Each library reads these once,
+# when it loads, so they are set before anything below imports one (config
+# reads JSON and nothing else). A value already in the environment wins.
+THREADS = str(int(config.load().threads))
+
+for _name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OPENCV_FOR_THREADS_NUM"):
+    os.environ.setdefault(_name, THREADS)
+
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+
 from delta import rig as rig_module
 from delta import wire
-from delta.brain import config
 from delta.brain.loop import Brain
 
 

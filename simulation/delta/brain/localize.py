@@ -23,6 +23,7 @@ the world origin and never moves.
 
 import json
 import math
+import os
 import struct
 import subprocess
 import threading
@@ -200,8 +201,22 @@ class RtabmapLocalizer:
         self._closing = False
         self._ready = threading.Event()
 
+        # RTAB-Map's libraries -- OpenCV, and OpenMP under it -- start one
+        # worker per hardware thread unless told otherwise, and idle workers
+        # spin instead of sleeping. Measured: 664% CPU, one thread working and
+        # nineteen at ~32% each waiting for work, on cores the window needed.
+        # See brain.json localization.threads.
+        threads = str(int(settings.get("threads", 2)))
+        environment = dict(
+            os.environ,
+            OMP_NUM_THREADS=threads,
+            OMP_WAIT_POLICY="PASSIVE",
+            OPENCV_FOR_THREADS_NUM=threads,
+        )
+
         self.process = subprocess.Popen(
             command,
+            env=environment,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

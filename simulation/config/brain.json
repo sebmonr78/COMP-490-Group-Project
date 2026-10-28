@@ -15,6 +15,13 @@
   "host": "127.0.0.1",
   "port": 47569
  },
+ "threads": 4,
+ "_threads": [
+  "Threads the brain's PyTorch, NumPy and OpenCV may each use (RTAB-Map's",
+  "are localization.threads). Unset, each starts one per hardware thread and",
+  "the idle ones spin: with Depth Anything, twenty threads at 25% each, five",
+  "cores waiting for work while the window beside them lagged."
+ ],
  "cameras": {
   "frame_rate": 10,
   "_frame_rate": [
@@ -26,6 +33,12 @@
   "bridge": "build/rtabmap_bridge/rtabmap_bridge",
   "keyframe_every": 0.3,
   "_keyframe_every": "seconds between frames offered to RTAB-Map's map; odometry sees all",
+  "threads": 2,
+  "_threads": [
+   "Threads RTAB-Map's libraries may use. Unset, OpenCV and OpenMP start",
+   "one per hardware thread (20 on the i9) and the idle ones spin: 664% CPU",
+   "for about one core's work, and the window beside it lagged."
+  ],
   "parameters": {
    "Reg/Force3DoF": "true",
    "Odom/Strategy": "0",
