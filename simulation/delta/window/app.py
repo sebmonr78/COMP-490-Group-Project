@@ -1169,6 +1169,17 @@ class DroneApp(Examiner):
         if stats:
             print(f"[profile] brain rates {stats.get('rates')} ms {stats.get('ms')}", flush=True)
 
+        # The replica's pictures are drawn on the painter's thread, outside the
+        # loop timed above, so a slow one never shows there -- only as a drag
+        # that the panel follows late.
+        timings = list(self.painter.timings)
+        self.painter.timings.clear()
+
+        if timings:
+            drawing, waited = np.median(np.array(timings), axis=0)
+            print(f"[profile] 3D panel {len(timings)} pictures, typical {drawing:.0f} ms drawing one, "
+                  f"{waited:.0f} ms from asked to ready, slowest {max(t[1] for t in timings):.0f} ms", flush=True)
+
     def _draw_replica(self):
         """The brain's 3D replica, in its own frame, orbiting the drone.
 

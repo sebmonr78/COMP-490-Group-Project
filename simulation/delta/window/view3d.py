@@ -12,9 +12,11 @@ it, scroll to come closer. Coordinates are the brain's: x and y on the
 floor, z up from it.
 """
 
+import collections
 import copy
 import math
 import threading
+import time
 
 import cv2
 import numpy as np
@@ -231,6 +233,10 @@ class Painter:
         self._job = None               # (view, centres, colours, size, voxel)
         self._done = None              # (view it was drawn from, picture)
         self._wake = threading.Condition()
+        # (ms drawing it, ms from asked to ready) per picture, for --profile:
+        # the second is what a drag waits for, queueing behind the picture
+        # already being drawn included.
+        self.timings = collections.deque(maxlen=500)
         threading.Thread(target=self._run, daemon=True).start()
 
     def ask(self, view, centres, colours, size, voxel=0.05, version=None):
@@ -242,7 +248,7 @@ class Painter:
         self._asked = key
 
         with self._wake:
-            self._job = (view.snapshot(), centres, colours, tuple(size), voxel)
+            self._job = (view.snapshot(), centres, colours, tuple(size), voxel, time.perf_counter())
             self._wake.notify()
 
     def latest(self):
@@ -256,6 +262,9 @@ class Painter:
                 while self._job is None:
                     self._wake.wait()
 
-                (view, centres, colours, size, voxel), self._job = self._job, None
+                (view, centres, colours, size, voxel, asked), self._job = self._job, None
 
+            started = time.perf_counter()
             self._done = (view, view._draw_cubes(centres, colours, size, voxel))
+            ready = time.perf_counter()
+            self.timings.append((1000.0 * (ready - started), 1000.0 * (ready - asked)))
