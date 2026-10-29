@@ -13,6 +13,18 @@ safely first.
 This README takes a machine with nothing on it to a running 3D house with a
 drone in it. Set aside about **2 hours**, most of it downloading.
 
+**The quick way.** On Linux or WSL2, from a clone of this repository:
+
+```bash
+cd ~/COMP-490-Group-Project/simulation && bash start_delta.sh
+```
+
+It checks each piece below in order, says what is missing and how big it is,
+asks before installing anything, and then starts DELTA with the full brain
+(Depth Anything 3 + RTAB-Map). `--light` uses the sim's true depth instead,
+and `--check` only looks. The sections below are what it does, step by step,
+for when something needs doing by hand.
+
 ---
 
 ## 1. What you are installing, and why
