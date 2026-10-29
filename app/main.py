@@ -14,6 +14,7 @@ from pydantic import BaseModel
 sys.path.append(str(Path(__file__).resolve().parents[1] / "database"))
 
 import db
+import mailer
 import passwords
 import simulations
 
@@ -43,6 +44,12 @@ def query(sql, params=()):
 SESSIONS = {}
 SESSION_COOKIE = "delta_session"
 SESSION_HOURS = 2  # how long a login lasts before you have to log in again
+
+# wrong passwords per email: email --> {"count": wrong tries so far, "locked_until": time}
+# in memory too, so a server restart clears it
+FAILED_LOGINS = {}
+MAX_LOGIN_FAILURES = 5     # wrong tries before the lock
+LOGIN_LOCK_MINUTES = 5     # how long the lock lasts
 
 # reset tokens waiting to be used: token --> (user_id, expires_at)
 # in memory, like SESSIONS, so a server restart forgets them
@@ -197,18 +204,37 @@ def login_page():
 
 @app.post("/api/login")
 def login(info: LoginInfo, response: Response):
+    email = clean_email(info.email)
+
+    # Locked out after too many wrong tries? Checked before the password,
+    # so even the right password is refused until the lock runs out.
+    entry = FAILED_LOGINS.get(email)
+    if entry and entry["locked_until"] > time.time():
+        minutes = int((entry["locked_until"] - time.time()) // 60) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many wrong tries. Try again in {minutes} minute(s).",
+        )
+
     # Backend DB: check if email and password are a correct pair
     rows = run(
         "SELECT user_id, first_name, password_hash FROM User WHERE email = ?",
-        (clean_email(info.email),),
+        (email,),
     )
 
     # Same message for a wrong email and a wrong password, so the page
-    # doesn't tell strangers which emails have accounts.
+    # doesn't tell strangers which emails have accounts. Emails that don't
+    # exist are counted too, so the lock looks the same for them.
     if not rows or not passwords.verify_password(info.password, rows[0]["password_hash"]):
+        entry = FAILED_LOGINS.setdefault(email, {"count": 0, "locked_until": 0})
+        entry["count"] += 1
+        if entry["count"] >= MAX_LOGIN_FAILURES:
+            entry["locked_until"] = time.time() + LOGIN_LOCK_MINUTES * 60
+            entry["count"] = 0
         raise HTTPException(status_code=401, detail="Email or password is wrong")
 
-    # correct login: give the browser a session ticket
+    # correct login: forget the wrong tries, then give the browser a session ticket
+    FAILED_LOGINS.pop(email, None)
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = (rows[0]["user_id"], time.time() + SESSION_HOURS * 3600)
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
@@ -251,11 +277,21 @@ def recover_password(info: PasswordRecoveryInfo):
             detail="No account matches that email and phone number",
         )
 
-    # No email server yet, so the reset link goes to the uvicorn terminal
-    # instead of an inbox. Swap this print for a real email send later.
+    # Email the reset link if mail settings exist (see mailer.py); otherwise
+    # the link goes to the uvicorn terminal instead of an inbox.
     token = secrets.token_urlsafe(32)
     RESET_TOKENS[token] = (rows[0]["user_id"], time.time() + RESET_MINUTES * 60)
-    print(f"[password reset] {email}: http://127.0.0.1:8000/reset-password?token={token}")
+
+    try:
+        sent = mailer.send_reset_email(email, token, RESET_MINUTES)
+    except OSError:
+        # the mail server wouldn't take it: forget the token, show the Server Error box
+        del RESET_TOKENS[token]
+        raise HTTPException(status_code=500, detail="Server error: could not send the reset email")
+
+    if not sent:
+        # no email settings: print the link here instead (same as before)
+        print(f"[password reset] {email}: http://127.0.0.1:8000/reset-password?token={token}")
 
     return {"message": f"An email to reset your password was sent to {email}"}
 
