@@ -1,0 +1,6 @@
+# Each person makes their own (README, step 1).
+venv/
+__pycache__/
+*.py[cod]
+# MuJoCo's warning log.
+MUJOCO_LOG.TXT
