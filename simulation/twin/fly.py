@@ -43,17 +43,22 @@ FILM_FPS = 30
 class Twin:
     """The body, its four motors and the flight brain, stepped together."""
 
-    def __init__(self):
-        self.body = Body()
-        m = self.body.model
-        self.model, self.data = m, self.body.data
-        self.motors = [Motor(self.body.motor_model) for _ in range(4)]
-        twist = abs(float(m.actuator_gear[0][5]))
-        self.brain = FlightController(self.body.mass, self.body.inertia,
-                                      self.body.rotors - self.body.centre_of_mass, self.body.spin,
-                                      twist, self.body.motor_model.max_thrust)
+    def __init__(self, world=""):
+        self.body = Body(world=world)
+        self.model, self.data = self.body.model, self.body.data
         air = self.body.spec["air"]
         self.drag = 0.5 * air["density"] * air["drag_area"]
+        self.perturb = None            # a viewer's mouse push (MjvPerturb), if any
+        self.reset()
+
+    def reset(self):
+        """Back on the floor where it started, motors off, brain fresh."""
+        m, b = self.model, self.body
+        mujoco.mj_resetData(m, self.data)
+        mujoco.mj_forward(m, self.data)
+        self.motors = [Motor(b.motor_model) for _ in range(4)]
+        self.brain = FlightController(b.mass, b.inertia, b.rotors - b.centre_of_mass, b.spin,
+                                      abs(float(m.actuator_gear[0][5])), b.motor_model.max_thrust)
         self.push = np.zeros(3)
         self.steps = 0
         self.thrust_cmd = np.zeros(4)
@@ -89,9 +94,12 @@ class Twin:
             twist -= b.spin[i] * motor.model.rotor_inertia * motor.acceleration
 
         up = d.xmat[b.frame].reshape(3, 3)[:, 2]
+        d.xfrc_applied[:] = 0.0
         d.xfrc_applied[b.frame, 3:6] = twist * up
         v = d.qvel[0:3]
         d.xfrc_applied[b.cage, 0:3] = -self.drag * np.linalg.norm(v) * v + self.push
+        if self.perturb is not None:
+            mujoco.mjv_applyPerturbForce(m, d, self.perturb)
 
         mujoco.mj_step(m, d)
         self.steps += 1

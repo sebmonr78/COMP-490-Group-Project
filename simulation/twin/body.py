@@ -108,8 +108,9 @@ def _part_geoms(spec, part):
     return out
 
 
-def mjcf(spec, motor_model):
-    """The MuJoCo XML for the drone, standing on a floor."""
+def mjcf(spec, motor_model, world=""):
+    """The MuJoCo XML for the drone, standing on a floor, with `world` (more
+    MJCF: walls, furniture, things to push) around it."""
     cage, gimbal, floor = spec["cage"], spec["gimbal"], spec["floor"]
     radius = cage["radius"]
     props = next(p for p in spec["parts"] if p["name"] == "props")
@@ -186,6 +187,7 @@ def mjcf(spec, motor_model):
         </body>
       </body>
     </body>
+    {world}
   </worldbody>
   <actuator>
     {(nl + "    ").join(actuators)}
@@ -198,10 +200,10 @@ class Body:
     """The built drone: MuJoCo's model and data, and what the rest needs to
     know about it."""
 
-    def __init__(self, path=CONFIG):
+    def __init__(self, path=CONFIG, world=""):
         self.spec = load_spec(path)
         self.motor_model = MotorModel(self.spec["motors"])
-        self.xml = mjcf(self.spec, self.motor_model)
+        self.xml = mjcf(self.spec, self.motor_model, world)
         self.model = mujoco.MjModel.from_xml_string(self.xml)
         self.data = mujoco.MjData(self.model)
 
@@ -209,6 +211,12 @@ class Body:
         self.frame = body("frame")
         self.cage = body("cage")
         self.rings = (body("inner_ring"), body("outer_ring"))
+        # The drone's free joint must come first: everything reads its state
+        # as qpos[0:7] / qvel[0:6], and its bearings as qpos[7:10]. A body
+        # added before it in the XML (the world goes after) moves them.
+        free = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "free")
+        assert self.model.jnt_qposadr[free] == 0 and self.model.jnt_dofadr[free] == 0, \
+            "the drone must be the first body with joints"
         self.spin = np.array(self.spec["motors"]["spin"], dtype=float)
         self.rotors = np.array([[x, y, -self._props_below()] for x, y in motor_positions(self.spec)])
         mujoco.mj_forward(self.model, self.data)
