@@ -1,0 +1,6 @@
+# The physics twin only (not the Habitat simulation): pip install -r twin/requirements.txt
+# Python 3.10 or newer. mujoco brings glfw (the window) and PyOpenGL with it.
+mujoco==3.17.0
+numpy>=2.0
+matplotlib
+pillow

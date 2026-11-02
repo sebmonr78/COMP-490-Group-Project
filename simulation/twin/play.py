@@ -29,15 +29,18 @@ is let go, and its tracking camera snaps back when slid.
 
 import math
 import os
+import platform
 import time
 
-# The window draws on the CPU (Mesa's llvmpipe), not through WSL's D3D12
-# bridge to the GPU: MuJoCo draws geom by geom, and the bridge charges each
-# draw ~0.3-1 ms. Measured on the twin in its room: 9 ms a frame on the CPU,
-# 56 ms through the bridge. Habitat is the opposite -- few, big draws -- so
-# it keeps d3d12 (~/.bashrc).
-os.environ["GALLIUM_DRIVER"] = os.environ.get("TWIN_GALLIUM_DRIVER", "llvmpipe")
-os.environ.pop("MESA_LOADER_DRIVER_OVERRIDE", None)
+# Under WSL the window draws on the CPU (Mesa's llvmpipe), not through WSL's
+# D3D12 bridge to the GPU: MuJoCo draws geom by geom, and the bridge charges
+# each draw ~0.3-1 ms. Measured on the twin in its room: 9 ms a frame on the
+# CPU, 56 ms through the bridge. Habitat is the opposite -- few, big draws --
+# so it keeps d3d12. Anywhere else (Windows, a Mac, Linux on its own
+# graphics card) the window gets the GPU as usual.
+if "microsoft" in platform.uname().release.lower() or "WSL_DISTRO_NAME" in os.environ:
+    os.environ["GALLIUM_DRIVER"] = os.environ.get("TWIN_GALLIUM_DRIVER", "llvmpipe")
+    os.environ.pop("MESA_LOADER_DRIVER_OVERRIDE", None)
 
 import glfw  # noqa: E402
 import mujoco  # noqa: E402
