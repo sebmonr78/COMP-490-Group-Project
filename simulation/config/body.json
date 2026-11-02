@@ -1,0 +1,122 @@
+{
+ "_comment": [
+  "The drone's body for the physics twin (twin/), part by part.",
+  "",
+  "Masses and watts are the parts list's (~/delta-video/calc.py: estimates",
+  "from 2026 listings). Places and sizes are a first layout, not CAD: they",
+  "decide where the centre of mass sits and what can hit what, so check them",
+  "against the real frame once it is built.",
+  "",
+  "Frame: the frame's own. Origin at the centre of the ball, which is also",
+  "the gimbal's pivot. +x forward, +y left, +z up -- MuJoCo's (and ROS's)",
+  "convention, NOT Habitat's.",
+  "",
+  "size: box = full lengths [x, y, z]; cylinder = [radius, length].",
+  "at: one centre, or a list of centres sharing the part's mass equally.",
+  "watts: average electrical draw of the electronics, before the 5 V",
+  "converter (motors are under `motors`)."
+ ],
+
+ "parts": [
+  {"name": "frame plate", "grams": 50, "shape": "box", "size": [0.09, 0.05, 0.006], "at": [0, 0, 0],
+   "_": "the 5-inch carbon frame's 110 g: 50 g of centre plates, 60 g of arms (below)"},
+  {"name": "arms", "grams": 60, "shape": "arm", "size": [0.007], "at": "motors",
+   "_": "four carbon arms, centre to each motor"},
+  {"name": "motors", "grams": 136, "shape": "cylinder", "size": [0.0135, 0.02], "at": "motors", "below": 0.013,
+   "_": "upside down under the arm ends"},
+  {"name": "props", "grams": 18, "shape": "cylinder", "size": [0.0635, 0.004], "at": "motors", "below": 0.028,
+   "_": "5-inch, 3-blade, pushing: under the motors"},
+  {"name": "esc", "grams": 15, "shape": "box", "size": [0.035, 0.035, 0.006], "at": [0, 0, -0.008], "watts": 0.5},
+  {"name": "flight controller", "grams": 40, "shape": "box", "size": [0.04, 0.04, 0.015], "at": [0, 0, 0.0115], "watts": 1.5},
+  {"name": "power module", "grams": 30, "shape": "box", "size": [0.03, 0.02, 0.012], "at": [-0.05, 0, -0.02]},
+  {"name": "battery", "grams": 590, "shape": "box", "size": [0.042, 0.084, 0.070], "at": [0, 0, -0.047],
+   "_": [
+    "4S2P Li-ion, 8 x Molicel P42A (21 x 70 mm). Stood on end, 2 x 4: lying",
+    "flat (84 x 70 mm) its corners are inside the propeller discs, which sit",
+    "at the same height. Hanging low also makes the frame a pendulum in the",
+    "gimbal: it levels itself when the motors are off."
+   ]},
+  {"name": "pi", "grams": 60, "shape": "box", "size": [0.085, 0.056, 0.02], "at": [0, 0, 0.029], "watts": 6.0},
+  {"name": "lidar", "grams": 42, "shape": "cylinder", "size": [0.019, 0.035], "at": [0, 0, 0.0565], "watts": 1.2,
+   "_": "LD06, on top: the props are underneath, so nothing cuts its ring but the cage"},
+  {"name": "stereo pair", "grams": 30, "shape": "box", "size": [0.015, 0.10, 0.02], "at": [0.06, 0, 0.012], "watts": 1.0},
+  {"name": "colour camera", "grams": 5, "shape": "box", "size": [0.01, 0.015, 0.015], "at": [0.07, 0, 0.012], "watts": 0.5},
+  {"name": "ir lamp", "grams": 5, "shape": "box", "size": [0.01, 0.015, 0.01], "at": [0.07, 0, -0.004], "watts": 1.5},
+  {"name": "tof ring", "grams": 8, "shape": "box", "size": [0.01, 0.01, 0.01],
+   "at": [[0.05, 0, 0], [-0.05, 0, 0], [0, 0.03, 0], [0, -0.03, 0]], "watts": 2.0},
+  {"name": "tf-luna", "grams": 5, "shape": "box", "size": [0.035, 0.021, 0.014], "at": [0.015, 0, -0.089], "watts": 0.4},
+  {"name": "optical flow", "grams": 2, "shape": "box", "size": [0.015, 0.015, 0.005], "at": [-0.015, 0.015, -0.085], "watts": 0.1},
+  {"name": "sonar", "grams": 9, "shape": "box", "size": [0.045, 0.02, 0.015], "at": [-0.01, -0.025, -0.0895], "watts": 0.1},
+  {"name": "radio", "grams": 2, "shape": "box", "size": [0.02, 0.012, 0.005], "at": [-0.04, 0.04, 0.005], "watts": 0.3},
+  {"name": "wires and screws", "grams": 50, "shape": "box", "size": [0.06, 0.06, 0.04], "at": [0, 0, -0.01]}
+ ],
+ "converter": 0.9,
+
+ "motors": {
+  "name": "EMAX ECO II 2207 2400KV, 5-inch 3-blade props",
+  "wheelbase": 0.22,
+  "_wheelbase": "motor to opposite motor, a typical 5-inch frame. PENDING: the real frame's",
+  "order": ["front right", "back left", "front left", "back right"],
+  "spin": [1, 1, -1, -1],
+  "_spin": "PX4's quad X: +1 turns counter-clockwise seen from above, and twists the frame the other way",
+
+  "bench": {
+   "volts": 16.8,
+   "rows": [[180, 2.31, 10710], [300, 4.47, 13720], [440, 7.3, 16390]],
+   "_rows": "[grams of thrust, amps, rpm]",
+   "max_grams": 1760,
+   "max_watts": 750,
+   "_": [
+    "EMAX publishes no table for the ECO II 2207 2400KV. These rows are the",
+    "ECO III 2207 2400KV (the same size and KV, the next version) on an",
+    "AVAN 5026 3-blade at 16.8 V, from a reseller's listing; max_grams is",
+    "the ECO II's listed maximum on 4S, max_watts the ECO III's. Hover",
+    "(~370 g a motor) falls inside the rows. REPLACE with our own thrust",
+    "stand test once the motors arrive."
+   ]
+  },
+
+  "spin_up": 0.03,
+  "spin_down": 0.03,
+  "_spin_up": "seconds: time constant of the motor reaching a new speed. ASSUMED (typical 5-inch, ESC braking on)",
+  "idle": 0.05,
+  "_idle": "of full speed, while armed: the ESC's idle so the motors never stall",
+  "rotor_inertia": 8.5e-6,
+  "_rotor_inertia": "kg m^2: prop (4.5 g, ~r^2/3) + bell (~15 g at 13 mm). ESTIMATE; speeding a rotor up twists the frame",
+  "shaft_efficiency": 0.8,
+  "_shaft_efficiency": "motor + ESC, electrical in to shaft out: for the props' twisting torque. ASSUMED"
+ },
+
+ "gimbal": {
+  "_": [
+   "Three bearings in a row, so the cage can roll any way while the frame",
+   "keeps its own: frame -(left/right)- inner ring -(front/back)- outer",
+   "ring -(top/bottom)- cage. The parts list's 4 ring bearings + 2 cage",
+   "bearings, as three pairs."
+  ],
+  "inner": {"grams": 50, "radius": 0.195, "tube": 0.004},
+  "outer": {"grams": 60, "radius": 0.207, "tube": 0.004},
+  "friction": 0.0005,
+  "_friction": "N m: each bearing pair's dry friction. ESTIMATE (small ball bearings)",
+  "damping": 1e-5
+ },
+
+ "cage": {
+  "grams": 200,
+  "radius": 0.225,
+  "bar": 0.003,
+  "_": "a thin shell: inertia 2/3 m r^2. Only the cage touches anything"
+ },
+
+ "air": {
+  "density": 1.2,
+  "drag_area": 0.03,
+  "_drag_area": "m^2, drag coefficient x frontal area of cage + drone. ESTIMATE: the cage is mostly holes. Measure with a coast-down test"
+ },
+
+ "floor": {
+  "friction": 0.8,
+  "rolling": 0.01125,
+  "_rolling": "m: MuJoCo's rolling friction = rolling resistance x cage radius (0.05 x 0.225, calc.py's hard floor)"
+ }
+}
