@@ -72,16 +72,42 @@ def _circle(radius, u, v, n=32, z=0.0):
             for t in np.linspace(0, 2 * math.pi, n, endpoint=False)]
 
 
-def _ring_geoms(points, tube, rgba, mass=None, name="ring"):
-    """A closed loop of capsules through `points`, its mass shared out."""
-    each = "" if mass is None else f' mass="{mass / len(points):.6g}"'
-    out = []
+def _tube_mesh(name, loops, tube, sides=6):
+    """One mesh asset of thin six-sided tubes around closed loops of points.
 
-    for i, (a, b) in enumerate(zip(points, points[1:] + points[:1])):
-        out.append(f'<geom name="{name}_{i}" type="capsule" fromto="{_f(a)} {_f(b)}" size="{tube}"'
-                   f' rgba="{rgba}" contype="0" conaffinity="0"{each}/>')
+    The cage and rings are hundreds of bars; drawn as hundreds of geoms,
+    WSL's GPU bridge spent ~1 ms on each and the viewer ran at 1 frame a
+    second. As one mesh they are one draw. Each bar runs a tube's width
+    past both ends, so the corners have no gaps."""
+    vertices, faces = [], []
 
-    return out
+    for points in loops:
+        for a, b in zip(points, points[1:] + points[:1]):
+            a, b = np.asarray(a, float), np.asarray(b, float)
+            axis = (b - a) / np.linalg.norm(b - a)
+            u = np.cross(axis, [0.0, 0.0, 1.0] if abs(axis[2]) < 0.9 else [1.0, 0.0, 0.0])
+            u /= np.linalg.norm(u)
+            v = np.cross(axis, u)                      # (u, v, axis) right-handed: faces point out
+            base = len(vertices)
+
+            for end in (a - tube * axis, b + tube * axis):
+                for k in range(sides):
+                    t = 2.0 * math.pi * k / sides
+                    vertices.append(end + tube * (math.cos(t) * u + math.sin(t) * v))
+
+            for k in range(sides):
+                k2 = (k + 1) % sides
+                faces += [(base + k, base + k2, base + sides + k),
+                          (base + k2, base + sides + k2, base + sides + k)]
+
+    return (f'<mesh name="{name}" inertia="shell" vertex="{_f(np.ravel(vertices))}"'
+            f' face="{" ".join(str(i) for i in np.ravel(faces))}"/>')
+
+
+def _hoop(grams, radius, normal):
+    """A thin ring's inertia: m r^2 about its axis, half that across it."""
+    m = grams / 1000.0
+    return " ".join(f"{m * radius ** 2 * (1.0 if axis == normal else 0.5):.6g}" for axis in range(3))
 
 
 def _part_geoms(spec, part):
@@ -125,25 +151,21 @@ def mjcf(spec, motor_model, world=""):
     rotors = [f'<site name="rotor{i}" pos="{x:.6g} {y:.6g} {-props["below"]:.6g}" size="0.005"/>'
               for i, (x, y) in enumerate(motor_positions(spec))]
 
+    # The rings (inner flat, outer upright) and the cage, to look at: four
+    # great circles through the poles and five circles of latitude. What
+    # touches the floor is one sphere; the masses are set by formula.
     inner = gimbal["inner"]
     outer = gimbal["outer"]
-    inner_ring = _ring_geoms(_circle(inner["radius"], (1, 0, 0), (0, 1, 0)), inner["tube"],
-                             "0.75 0.75 0.78 1", inner["grams"] / 1000.0, "inner_ring")
-    outer_ring = _ring_geoms(_circle(outer["radius"], (1, 0, 0), (0, 0, 1)), outer["tube"],
-                             "0.75 0.75 0.78 1", outer["grams"] / 1000.0, "outer_ring")
-
-    # The cage, to look at: four great circles through the poles and five
-    # circles of latitude. What touches the floor is one sphere.
-    bars = []
-
-    for k, phi in enumerate(np.radians([0, 45, 90, 135])):
-        bars += _ring_geoms(_circle(radius, (math.cos(phi), math.sin(phi), 0), (0, 0, 1)),
-                            cage["bar"], "0.95 0.95 0.95 0.8", name=f"meridian{k}")
-
-    for k, lat in enumerate(np.radians([-60, -30, 0, 30, 60])):
-        bars += _ring_geoms(_circle(radius * math.cos(lat), (1, 0, 0), (0, 1, 0), z=radius * math.sin(lat)),
-                            cage["bar"], "0.95 0.95 0.95 0.8", name=f"latitude{k}")
-
+    meshes = [
+        _tube_mesh("inner_ring", [_circle(inner["radius"], (1, 0, 0), (0, 1, 0))], inner["tube"]),
+        _tube_mesh("outer_ring", [_circle(outer["radius"], (1, 0, 0), (0, 0, 1))], outer["tube"]),
+        _tube_mesh("cage_bars",
+                   [_circle(radius, (math.cos(phi), math.sin(phi), 0), (0, 0, 1)) for phi in np.radians([0, 45, 90, 135])]
+                   + [_circle(radius * math.cos(lat), (1, 0, 0), (0, 1, 0), z=radius * math.sin(lat))
+                      for lat in np.radians([-60, -30, 0, 30, 60])],
+                   cage["bar"]),
+    ]
+    looks = 'contype="0" conaffinity="0" mass="0"'
     shell = 2.0 / 3.0 * cage["grams"] / 1000.0 * radius ** 2
     actuators = [f'<motor name="motor{i}" site="rotor{i}" gear="0 0 1 0 0 {-s * twist:.6g}"'
                  f' ctrllimited="true" ctrlrange="0 {motor_model.max_thrust:.6g}"/>'
@@ -163,6 +185,7 @@ def mjcf(spec, motor_model, world=""):
     <texture name="sky" type="skybox" builtin="gradient" rgb1="0.78 0.84 0.92" rgb2="0.97 0.97 0.98" width="256" height="256"/>
     <texture name="grid" type="2d" builtin="checker" rgb1="0.84 0.84 0.82" rgb2="0.74 0.74 0.72" width="512" height="512"/>
     <material name="floor" texture="grid" texrepeat="25 25" reflectance="0.03"/>
+    {(nl + "    ").join(meshes)}
   </asset>
   <worldbody>
     <light pos="3 -3 6" dir="-0.4 0.4 -1" castshadow="true"/>
@@ -174,15 +197,17 @@ def mjcf(spec, motor_model, world=""):
       <site name="imu" pos="0 0 0.0115" size="0.004"/>
       <body name="inner_ring">
         <joint name="bearing_left_right" type="hinge" axis="0 1 0" {bearing}/>
-        {(nl + "        ").join(inner_ring)}
+        <inertial pos="0 0 0" mass="{inner['grams'] / 1000.0}" diaginertia="{_hoop(inner['grams'], inner['radius'], 2)}"/>
+        <geom name="inner_ring" type="mesh" mesh="inner_ring" rgba="0.75 0.75 0.78 1" {looks}/>
         <body name="outer_ring">
           <joint name="bearing_front_back" type="hinge" axis="1 0 0" {bearing}/>
-          {(nl + "          ").join(outer_ring)}
+          <inertial pos="0 0 0" mass="{outer['grams'] / 1000.0}" diaginertia="{_hoop(outer['grams'], outer['radius'], 1)}"/>
+          <geom name="outer_ring" type="mesh" mesh="outer_ring" rgba="0.75 0.75 0.78 1" {looks}/>
           <body name="cage">
             <joint name="bearing_top_bottom" type="hinge" axis="0 0 1" {bearing}/>
             <inertial pos="0 0 0" mass="{cage['grams'] / 1000.0}" diaginertia="{shell:.6g} {shell:.6g} {shell:.6g}"/>
             <geom name="cage" type="sphere" size="{radius}" rgba="0 0 0 0" condim="6" friction="{friction}"/>
-            {(nl + "            ").join(bars)}
+            <geom name="cage_bars" type="mesh" mesh="cage_bars" rgba="0.95 0.95 0.95 0.8" {looks}/>
           </body>
         </body>
       </body>

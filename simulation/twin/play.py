@@ -28,8 +28,13 @@ import os
 import time
 import tkinter as tk
 
-# The window's OpenGL on the graphics card, not the CPU (see the WSL GPU note).
-os.environ.setdefault("GALLIUM_DRIVER", "d3d12")
+# The 3D window draws on the CPU (Mesa's llvmpipe), not through WSL's D3D12
+# bridge to the GPU: MuJoCo draws geom by geom, and the bridge charges each
+# draw ~0.3-1 ms. Measured on the twin in its room: 9 ms a frame on the CPU,
+# 56 ms through the bridge (and 900 ms before the cage became one mesh).
+# Habitat is the opposite -- few, big draws -- so it keeps d3d12.
+os.environ["GALLIUM_DRIVER"] = os.environ.get("TWIN_GALLIUM_DRIVER", "llvmpipe")
+os.environ.pop("MESA_LOADER_DRIVER_OVERRIDE", None)         # ~/.bashrc sets d3d12 for Habitat
 
 import mujoco  # noqa: E402
 import mujoco.viewer  # noqa: E402
@@ -185,13 +190,15 @@ class Panel:
         self.sim_started = twin.data.time
         self.last_sync = 0.0
         self.last_text = 0.0
+        self.pace = (time.perf_counter(), twin.data.time)     # wall, sim: for the sim speed readout
+        self.sim_speed = 1.0
         self.names = {i: mujoco.mj_id2name(twin.model, mujoco.mjtObj.mjOBJ_GEOM, i) or ""
                       for i in range(twin.model.ngeom)}
 
         root.title("DELTA twin - remote")
         root.configure(bg="#f4f4f2")
         font = ("DejaVu Sans Mono", 11)
-        self.readout = tk.Label(root, font=font, justify="left", anchor="nw", bg="#f4f4f2", width=46, height=12)
+        self.readout = tk.Label(root, font=font, justify="left", anchor="nw", bg="#f4f4f2", width=46, height=13)
         self.readout.pack(padx=12, pady=(12, 6), fill="x")
 
         row = tk.Frame(root, bg="#f4f4f2")
@@ -288,6 +295,10 @@ class Panel:
             self.viewer.sync()
             self.last_sync = now
         if now - self.last_text > 0.1:
+            wall, sim = self.pace
+            if now - wall > 1.0:
+                self.sim_speed = (d.time - sim) / (now - wall)
+                self.pace = (now, d.time)
             self._show()
             self.last_text = now
 
@@ -313,7 +324,8 @@ class Panel:
             f"battery    {100 * left / usable:5.1f}% left  ({self.energy_wh:.2f} Wh used)\n"
             f"time left  {60 * left / max(watts, 1e-6):5.1f} min at this power\n"
             f"touching   {', '.join(touching) or '-'}\n"
-            f"keys       {' '.join(sorted(self.keys)) or '-'}"))
+            f"keys       {' '.join(sorted(self.keys)) or '-'}\n"
+            f"sim speed  {self.sim_speed:4.2f} x real time"))
 
 
 def main():
