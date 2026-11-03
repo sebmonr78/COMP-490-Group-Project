@@ -28,9 +28,14 @@ from delta.brain.loop import Brain
 def main():
     parser = argparse.ArgumentParser(description="The glasses' brain.")
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--memory", default=None,
+                        help="the folder its map is kept in (default: brain.json's memory.directory); "
+                             "run_drone.sh gives each run its own, so several can run at once")
     args = parser.parse_args()
 
     settings = config.load()
+    if args.memory:
+        settings["memory"]["directory"] = args.memory
     rig = rig_module.load()
 
     left = rig.camera(rig.stereo_pair[0])

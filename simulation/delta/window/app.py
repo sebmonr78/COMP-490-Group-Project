@@ -56,6 +56,8 @@ import collections
 import contextlib
 import math
 import os
+import signal
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -63,6 +65,10 @@ from pathlib import Path
 os.environ.setdefault("SDL_FRAMEBUFFER_ACCELERATION", "0")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Where this run's brain writes its log: run_drone.sh says, since each run
+# (--run NAME) has its own.
+BRAIN_LOG = os.environ.get("DELTA_BRAIN_LOG", "outputs/logs/brain.log")
 
 import cv2  # noqa: E402
 import habitat_sim  # noqa: E402
@@ -219,6 +225,8 @@ class Stopwatch:
         self.parts, self.loops, self.started = {}, 0, time.monotonic()
         self.frames = []           # how long each loop took, s: steadiness, not just the average
         self._last = None
+        self._this_frame = {}      # part -> seconds, in the loop under way
+        self.slow = {}             # part -> how many slow loops it was the biggest part of
 
     def tick(self):
         """Called once a loop: notes how long the loop took."""
@@ -227,7 +235,13 @@ class Stopwatch:
         if self._last is not None:
             self.frames.append(now - self._last)
 
+            # A slow loop (over 45 ms): which part was the biggest in it.
+            if now - self._last > 0.045 and self._this_frame:
+                blamed = max(self._this_frame, key=self._this_frame.get)
+                self.slow[blamed] = self.slow.get(blamed, 0) + 1
+
         self._last = now
+        self._this_frame = {}
         self.loops += 1
 
     @contextlib.contextmanager
@@ -237,7 +251,9 @@ class Stopwatch:
         try:
             yield
         finally:
-            self.parts[name] = self.parts.get(name, 0.0) + time.perf_counter() - start
+            took = time.perf_counter() - start
+            self.parts[name] = self.parts.get(name, 0.0) + took
+            self._this_frame[name] = self._this_frame.get(name, 0.0) + took
 
     def rate(self):
         return self.loops / max(time.monotonic() - self.started, 1e-6)
@@ -256,6 +272,10 @@ class Stopwatch:
             ms = 1000.0 * np.array(self.frames)
             line += (f" (ms per loop) | frames: typical {np.median(ms):.0f} ms, 1 in 20 over "
                      f"{np.percentile(ms, 95):.0f} ms, slowest {ms.max():.0f} ms, over 50 ms: {int((ms > 50).sum())}")
+
+            if self.slow:
+                line += " | slow loops, biggest part: " + ", ".join(
+                    f"{name} {count}" for name, count in sorted(self.slow.items(), key=lambda kv: -kv[1]))
         else:
             line += " (ms per loop)"
 
@@ -459,6 +479,11 @@ class DroneApp(Examiner):
     # -----------------------------------------------------------------
 
     def run(self, display):
+        # Stopped from outside -- the web page's Stop sends SIGTERM: finish
+        # the loop and shut down as on Esc (the brain saves its map, the
+        # camera process is closed) instead of dying mid-frame.
+        signal.signal(signal.SIGTERM, lambda *_: setattr(self, "running", False))
+
         self.display = display
         self.screen = pygame.Surface(WINDOW)
         self.screen.fill(BACKGROUND)
@@ -1624,7 +1649,7 @@ class DroneApp(Examiner):
         if self.brain is None:
             self._text("Running without a brain (--no-brain)", (MAP_X + px(12), px(70)), self.font, (200, 120, 120))
         elif not self.brain.connected:
-            message = (f"The brain stopped ({self.brain.error}). Close this window and see outputs/logs/brain.log."
+            message = (f"The brain stopped ({self.brain.error}). Close this window and see {BRAIN_LOG}."
                        if self.brain.error else "Waiting for the brain to start...")
             self._text(message, (MAP_X + px(12), px(70)), self.font, (240, 120, 90))
         elif not self.brain.ready:
@@ -1633,7 +1658,7 @@ class DroneApp(Examiner):
             # Connected but quiet: the brain is stuck or one of its threads
             # died. Its position and map on screen are frozen, not live.
             self._text(f"The brain has not answered for {silent:.0f} s -- what you see is frozen. "
-                       "See outputs/logs/brain.log.", (MAP_X + px(12), px(70)), self.font, (240, 120, 90))
+                       f"See {BRAIN_LOG}.", (MAP_X + px(12), px(70)), self.font, (240, 120, 90))
 
     def _draw_feeds(self):
         """The left lens, and the depth the brain made of it.
@@ -1706,9 +1731,9 @@ class DroneApp(Examiner):
             if self.brain is None:
                 text = "No brain (--no-brain): the house only, nothing is mapped."
             elif self.brain.error:
-                text = f"Brain not reachable: {self.brain.error}. See outputs/logs/brain.log."
+                text = f"Brain not reachable: {self.brain.error}. See {BRAIN_LOG}."
             elif not self.brain.connected:
-                text = "Waiting for the brain to start... (if this lasts, see outputs/logs/brain.log)"
+                text = f"Waiting for the brain to start... (if this lasts, see {BRAIN_LOG})"
             else:
                 text = "Brain connected, loading models..."
 
@@ -1884,8 +1909,18 @@ class DroneApp(Examiner):
         folder = PROJECT_ROOT / "outputs" / "screenshots"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{name or time.strftime('%Y%m%d-%H%M%S')}.png"
-        pygame.image.save(self.screen, str(path))
-        print(f"Saved {path}")
+
+        # A copy now, written on a thread: writing a 4K PNG takes most of a
+        # second, and done here it froze the window for that long.
+        picture = self.screen.copy()
+
+        def write():
+            pygame.image.save(picture, str(path))
+            print(f"Saved {path}", flush=True)
+
+        writer = threading.Thread(target=write, name="screenshot")
+        writer.start()
+        self._writers = [w for w in getattr(self, "_writers", []) if w.is_alive()] + [writer]
 
 
 def _wrap(text, font, width):

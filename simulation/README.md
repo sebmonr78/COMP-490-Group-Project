@@ -395,6 +395,19 @@ and the size of the 2D map, the 3D replica and RTAB-Map's database.
 
 Without `--fresh` the brain starts from the map it saved last time.
 
+**Several at once.** Each run needs its own brain port and its own map, so
+add `--run NAME` to every run after the first:
+
+```bash
+bash run_drone.sh --run alice --fresh
+```
+
+Its map and log go to `outputs/runs/alice/` instead of `outputs/memory` and
+`outputs/logs/`, and it picks the next free port by itself (47569, 47570, and
+so on up to 47599). A second run on a map already in use is refused and says
+so. The website gives each of its runs a name and port of its own
+(`web-1` on 47600, `web-2` on 47601, and so on).
+
 **One part at a time.** Each part of the brain can be swapped for the
 simulator's ground truth, so that one part can be checked on its own:
 
@@ -416,6 +429,8 @@ the position being wrong. The general switches, for `run_drone.sh` too:
 | `--script FILE` | drive from a script (`tests/scripts/`) |
 | `--trace FILE` | log position error and RTAB-Map health |
 | `--headless` | no window |
+| `--run NAME` | a run of its own: map and log in `outputs/runs/NAME/`, next to other runs |
+| `--port N` | the brain's port (default: 47569 or the next free one) |
 
 **This is the real test of the setup.** `check_setup.py` can report READY on
 a machine that still cannot draw anything. If this window opens and the map
@@ -575,6 +590,10 @@ delta/window/link.py        the window's end of the cable
 delta/window/script.py      test drives from tests/scripts/*.json
 delta/window/view3d.py      draws the 3D replica panel
 
+THE FIRST DEMO -- the web app's "Simple drive" runs it
+demo/open_environment.py    drive the drone next to the true layout; no brain
+delta/navigation.py         routes on the true navmesh, for that demo
+
 config/project.json         env name, versions, data paths, scene, drone size
 config/rig.json             the cameras, as hardware: baseline, lens, mounting
 config/brain.json           the brain's settings, each with why
@@ -623,7 +642,7 @@ harmless.
 | Window opens black, or everything is slow | rendering on the CPU | `echo $GALLIUM_DRIVER` must say `d3d12` (section 9) |
 | Drone will not take off | no room overhead | drive it out from under the furniture and press `1` again |
 | "Waiting for the brain..." never ends | the brain failed to start | read `outputs/logs/brain.log` |
-| `Another DELTA brain is already running` | a second run was started | close the other window first; two runs share one port |
+| `Another DELTA is already using the map in ...` | a second run on the same map | add `--run NAME` to run beside it, or close the other first |
 | `No RTAB-Map bridge` | the bridge was never compiled | `bash setup/setup_rtabmap.sh` |
 | No map appears | the floor was never seen, so depth had no scale | drive where the floor is in view |
 | Camera height reads far too low | the cameras are not level | `measured.pitch` in `config/rig.json` must be 0 -- read the note there |

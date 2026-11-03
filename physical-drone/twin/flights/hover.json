@@ -1,0 +1,15 @@
+[
+ {"takeoff": 1.0, "name": "take off"},
+ {"hold": 15, "name": "hover"},
+ {"goto": [2.0, 0.0, 1.0], "name": "forward 2 m"},
+ {"hold": 3, "name": "settle"},
+ {"goto": [2.0, 0.0, 2.0], "name": "climb 1 m"},
+ {"hold": 3, "name": "settle"},
+ {"yaw": 90, "name": "turn left 90"},
+ {"hold": 3, "name": "settle"},
+ {"push": [0.0, 3.0, 0.0], "for": 0.5, "name": "gust 3 N"},
+ {"hold": 4, "name": "ride it out"},
+ {"goto": [0.0, 0.0, 1.0], "name": "back"},
+ {"hold": 3, "name": "settle"},
+ {"land": true, "name": "land"}
+]
