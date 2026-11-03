@@ -286,7 +286,14 @@ def load_or_generate_navmesh(simulator, navmesh_file, drone_config):
     print("[PASS] Drone navmesh generated")
 
     navmesh_file.parent.mkdir(parents=True, exist_ok=True)
-    simulator.pathfinder.save_nav_mesh(str(navmesh_file))
+
+    # Written beside it and then moved into place: two DELTA runs started at
+    # once on a new house both build it, and one must never load the other's
+    # half-written file.
+    partial = navmesh_file.with_name(f"{navmesh_file.name}.{os.getpid()}.partial")
+    simulator.pathfinder.save_nav_mesh(str(partial))
+    if partial.is_file():
+        os.replace(partial, navmesh_file)
 
     if navmesh_file.is_file():
         print(f"[PASS] Saved: {navmesh_file.name}")

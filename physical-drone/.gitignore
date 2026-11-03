@@ -1,0 +1,9 @@
+# Each person makes their own (README, step 1).
+venv/
+__pycache__/
+*.py[cod]
+# MuJoCo's warning log.
+MUJOCO_LOG.TXT
+
+# Results of runs from the website (app/simulations.py), one folder per slot.
+outputs/

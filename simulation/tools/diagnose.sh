@@ -19,6 +19,14 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Not while a run is using the default map, which every step below deletes
+# (runs with --run NAME keep theirs in outputs/runs/ and may go on).
+mkdir -p outputs/memory
+if ! flock -n outputs/memory/.in-use true; then
+    echo "A DELTA run is using the default map (outputs/memory) -- close it first. Nothing was changed." >&2
+    exit 1
+fi
+
 out=outputs/diagnose
 rm -rf "${out}"
 mkdir -p "${out}"

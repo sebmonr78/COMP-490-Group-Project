@@ -19,13 +19,14 @@ cd "$(dirname "$0")/.."
 name="${1:?name}"; count="${2:?count}"; script="${3:-tests/scripts/diagnose.json}"
 shift 3 2>/dev/null || shift $#
 
-# Not while someone else is driving. Each run below deletes outputs/memory
-# first, which is the map database of a run already in progress -- and that
-# run's brain owns the port anyway, so these would all be refused after the
-# damage was done. Checked once, up front, before anything is touched.
-if pgrep -f "python -u -m delta.brain|python demo/run_drone.py" > /dev/null; then
-    echo "DELTA is already running (a brain or a window) -- close it first. Nothing was changed:" >&2
-    pgrep -af "python -u -m delta.brain|python demo/run_drone.py" >&2
+# Not while someone else is driving on the default map. Each run below
+# deletes outputs/memory first, which is the map database of a run already
+# in progress there. Runs started with --run NAME (the website's, say) keep
+# their maps in outputs/runs/ and are not touched, so they may go on beside
+# these. Checked once, up front, before anything is touched.
+mkdir -p outputs/memory
+if ! flock -n outputs/memory/.in-use true; then
+    echo "A DELTA run is using the default map (outputs/memory) -- close it first. Nothing was changed." >&2
     exit 1
 fi
 
