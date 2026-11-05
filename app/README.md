@@ -86,6 +86,7 @@ It should end with `OK`. The tests use a temporary database (your `delta.db` is 
 - `/api/drones` your drones (needs a login)
 - `/api/sessions` your scans, newest first (needs a login)
 - `/api/sessions/{id}/changes` what moved, appeared, or disappeared in that scan compared to the one before it (needs a login, 404 if it's not your scan)
+- `/api/me` who is logged in (name and email, for the "Logged in as" text; needs a login)
 - `/api/simulations` the simulations the page can run (all the simulation endpoints need a login too)
 - `POST /api/simulations/{id}/start?where=browser|server` runs one (`open-environment`, `drone-tests`, `check-setup`)
 - `POST /api/simulations/stop` stops the one that's running

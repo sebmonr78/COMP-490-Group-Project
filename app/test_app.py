@@ -123,6 +123,7 @@ class LoginAndLogout(AppTest):
     def test_logged_out_data_and_simulation_endpoints_return_401(self):
         for method, url in [
             ("get", "/api/drones"), ("get", "/api/sessions"),
+            ("get", "/api/me"),
             ("get", "/api/sessions/2/changes"),
             ("get", "/api/simulations"), ("get", "/api/simulations/run"),
             ("post", "/api/simulations/stop"),
@@ -155,6 +156,18 @@ class EachUserSeesOnlyTheirOwnData(AppTest):
         self.assertEqual(login(self.client, "new@example.com", "secret123").status_code, 200)
         self.assertEqual(self.client.get("/api/drones").json(), [])
         self.assertEqual(self.client.get("/api/sessions").json(), [])
+
+    def test_me_says_who_is_logged_in(self):
+        self.login_demo()
+        me = self.client.get("/api/me").json()
+        # exactly these three keys, so no password hash can sneak in
+        self.assertEqual(me, {"first_name": "Demo", "last_name": "User", "email": "demo@example.com"})
+
+    def test_me_is_each_users_own_info(self):
+        register(self.client, "new@example.com")
+        login(self.client, "new@example.com", "secret123")
+        me = self.client.get("/api/me").json()
+        self.assertEqual(me, {"first_name": "Test", "last_name": "User", "email": "new@example.com"})
 
     def test_somebody_elses_scan_is_not_found(self):
         register(self.client, "new@example.com")

@@ -110,6 +110,21 @@ def list_drones(user_id: int = Depends(require_login)):
     )
 
 
+@app.get("/api/me")
+def who_am_i(user_id: int = Depends(require_login)):
+    # Who is logged in, for the "Logged in as ..." text on the dashboard.
+    # It only sends the name and email, never the password hash.
+    rows = query(
+        "SELECT first_name, last_name, email FROM User WHERE user_id = ?",
+        (user_id,),
+    )
+
+    if not rows:
+        raise HTTPException(status_code=401, detail="You got to log in!! Your drone is in another castle.")
+
+    return rows[0]
+
+
 @app.get("/api/sessions")
 def list_sessions(user_id: int = Depends(require_login)):
     # Newest scan first, only scans made by this user's drones
