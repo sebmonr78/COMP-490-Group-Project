@@ -76,6 +76,20 @@
       cursor: pointer; 
     }
 
+    /* "Logged in as ..." text next to the Log out button */
+    .account {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    #whoami {
+      color: #667;
+      font-size: 0.9rem;
+    }
+
     /* Soft grey note for empty or loading messages (hides itself when empty) */
     .note {
       color: #667;
@@ -139,7 +153,10 @@
       <h1>DELTA</h1>
       <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
     </div>
-    <button id="logout-button">Log out</button>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout-button">Log out</button>
+    </div>
   </header>
 
   <h2>Simulations</h2>
@@ -381,6 +398,33 @@
       }
     }
 
+    // Shows "Logged in as Demo User" next to the Log out button
+    async function loadMe() {
+      const whoami = document.getElementById("whoami");
+
+      try {
+        const response = await fetch("/api/me");
+
+        if (response.status === 401) {
+          window.location.href = "/";  // ticket is gone --> back to login
+          return;
+        }
+
+        // Not worth an error message, so if it fails the text just stays blank
+        if (!response.ok) {
+          return;
+        }
+
+        const me = await response.json();
+        const fullName = ((me.first_name || "") + " " + (me.last_name || "")).trim();
+
+        whoami.textContent = "Logged in as " + (fullName || me.email);
+        whoami.title = me.email;  // hover to see the email
+      } catch (error) {
+        // leave it blank
+      }
+    }
+
     // Log out: tell the server to forget our ticket, then go back to the login page
     document.getElementById("logout-button").addEventListener("click", async () => {
       await fetch("/api/logout", { method: "POST" });
@@ -590,6 +634,7 @@
 
     // Run everything as soon as the page opens
     loadSimulations().then(pollRun);
+    loadMe();
     loadDrones();
     loadChanges();
   </script>
