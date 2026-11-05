@@ -45,11 +45,15 @@ SESSIONS = {}
 SESSION_COOKIE = "delta_session"
 SESSION_HOURS = 2  # how long a login lasts before you have to log in again
 
-# wrong passwords per email: email --> {"count": wrong tries so far, "locked_until": time}
-# in memory too, so a server restart clears it
-FAILED_LOGINS = {}
-MAX_LOGIN_FAILURES = 5     # wrong tries before the lock
-LOGIN_LOCK_MINUTES = 5     # how long the lock lasts
+# wrong passwords, counted two ways. Each entry looks like
+# {"count": wrong tries so far, "locked_until": time, "last_try": time}
+# both live in memory too, so a server restart clears them
+FAILED_LOGINS = {}         # one computer + one email: (address, email) --> entry
+FAILED_BY_IP = {}          # one computer, any emails: address --> entry
+MAX_LOGIN_FAILURES = 5     # wrong tries for one email from one computer before the lock
+MAX_IP_FAILURES = 20       # wrong tries from one computer (any emails) before the lock
+LOGIN_LOCK_MINUTES = 5     # how long a lock lasts
+FAILURE_MEMORY_MINUTES = 15  # a computer that stays quiet this long is forgotten
 
 # reset tokens waiting to be used: token --> (user_id, expires_at)
 # in memory, like SESSIONS, so a server restart forgets them
@@ -217,15 +221,51 @@ def run(sql, params=()):
 def login_page():
     return FileResponse(STATIC / "login.html")
 
+def client_address(request: Request):
+    # The computer the request came from (a proxy's address if there is one)
+    return request.client.host if request.client else "unknown"
+
+
+def forget_old_failures():
+    # Throws away entries that aren't locked and haven't been touched for a while,
+    # so the dictionaries don't grow forever
+    now = time.time()
+    cutoff = now - FAILURE_MEMORY_MINUTES * 60
+
+    for table in (FAILED_LOGINS, FAILED_BY_IP):
+        old = [key for key, entry in table.items()
+               if entry["locked_until"] < now and entry["last_try"] < cutoff]
+        for key in old:
+            del table[key]
+
+
+def count_failure(table, key, limit):
+    # Adds one wrong try, and starts a lock when the limit is reached
+    entry = table.setdefault(key, {"count": 0, "locked_until": 0, "last_try": 0})
+    entry["count"] += 1
+    entry["last_try"] = time.time()
+
+    if entry["count"] >= limit:
+        entry["locked_until"] = time.time() + LOGIN_LOCK_MINUTES * 60
+        entry["count"] = 0
+
+
 @app.post("/api/login")
-def login(info: LoginInfo, response: Response):
+def login(info: LoginInfo, request: Request, response: Response):
     email = clean_email(info.email)
+    address = client_address(request)
+    forget_old_failures()
 
     # Locked out after too many wrong tries? Checked before the password,
     # so even the right password is refused until the lock runs out.
-    entry = FAILED_LOGINS.get(email)
-    if entry and entry["locked_until"] > time.time():
-        minutes = int((entry["locked_until"] - time.time()) // 60) + 1
+    # There are two locks: this computer + this email, and this computer on its own.
+    locked_until = 0
+    for entry in (FAILED_LOGINS.get((address, email)), FAILED_BY_IP.get(address)):
+        if entry and entry["locked_until"] > locked_until:
+            locked_until = entry["locked_until"]
+
+    if locked_until > time.time():
+        minutes = int((locked_until - time.time()) // 60) + 1
         raise HTTPException(
             status_code=429,
             detail=f"Too many wrong tries. Try again in {minutes} minute(s).",
@@ -241,15 +281,14 @@ def login(info: LoginInfo, response: Response):
     # doesn't tell strangers which emails have accounts. Emails that don't
     # exist are counted too, so the lock looks the same for them.
     if not rows or not passwords.verify_password(info.password, rows[0]["password_hash"]):
-        entry = FAILED_LOGINS.setdefault(email, {"count": 0, "locked_until": 0})
-        entry["count"] += 1
-        if entry["count"] >= MAX_LOGIN_FAILURES:
-            entry["locked_until"] = time.time() + LOGIN_LOCK_MINUTES * 60
-            entry["count"] = 0
+        count_failure(FAILED_LOGINS, (address, email), MAX_LOGIN_FAILURES)
+        count_failure(FAILED_BY_IP, address, MAX_IP_FAILURES)
         raise HTTPException(status_code=401, detail="Email or password is wrong")
 
-    # correct login: forget the wrong tries, then give the browser a session ticket
-    FAILED_LOGINS.pop(email, None)
+    # correct login: forget the wrong tries for this email (the computer's own
+    # count stays, so someone can't reset it by logging in to an account they own),
+    # then give the browser a session ticket
+    FAILED_LOGINS.pop((address, email), None)
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = (rows[0]["user_id"], time.time() + SESSION_HOURS * 3600)
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",

@@ -50,7 +50,7 @@ Go to http://127.0.0.1:8000 and you should see the login page. Log in with the d
 - Everybody only sees their own stuff. Drones are matched by `owner_id` and scans go through their drone. Asking for somebody else's scan gives 404 "Scan not found".
 - Passwords are hashed (PBKDF2 with a random salt, see `database/passwords.py`), never stored as plain text.
 - Forgot password: unless the email settings are on (see below), the reset link prints in the uvicorn terminal instead of being emailed. The link works once and lasts 15 minutes (`RESET_MINUTES`). It opens `/reset-password` where you pick a new password, and that also logs out any browser that was already signed in as you.
-- Wrong passwords are counted per email. After 5 wrong tries that email is locked for 5 minutes, even for the right password (`MAX_LOGIN_FAILURES` and `LOGIN_LOCK_MINUTES` in `main.py`).
+- Wrong passwords are counted per computer and email. After 5 wrong tries that email is locked for 5 minutes, but only for that computer, so a stranger can't lock you out. One computer that makes 20 wrong tries (any emails) is locked for 5 minutes too. Even the right password is refused during a lock. A computer that stays quiet for 15 minutes is forgotten (`MAX_LOGIN_FAILURES`, `MAX_IP_FAILURES`, `LOGIN_LOCK_MINUTES` and `FAILURE_MEMORY_MINUTES` in `main.py`).
 
 ## Turning on reset emails
 
@@ -144,11 +144,11 @@ DELTA_SIM_PYTHON=~/miniconda3/envs/habitat/bin/python uvicorn main:app --reload
 - Login added `first_name`, `last_name` and `phone_number` to the `User` table. If you made `delta.db` before that, rebuild it: `python3 create_db.py --reset --seed`.
 - `venv` isn't in git, so everybody makes their own.
 - The backend uses `database/db.py` to open the database, so keep the `database` folder next to `app`.
-- The login lockout is basic. It counts per email, so someone can lock a person out for 5 minutes by typing wrong passwords for their email. The counts only live in memory, so restarting the server clears them, and old entries are never cleaned up. That's fine for the simulation phase but it would need fixing before the app goes on the internet.
+- The login lockout has limits. People on the same shared connection (like campus wifi) look like one computer to the server, so 20 wrong tries between them locks all of them for 5 minutes. Someone with lots of different computers could still try an email 5 times from each one. The counts only live in memory, so restarting the server clears them. That's fine for the simulation phase, but it would need another look before the app goes on the internet.
 
 ## Still to do
 
-- make the login lockout stronger (also track the computer's address, keep the counts in the database, clean up old entries; the lockout tests in `test_app.py` will need updating too)
+- keep the login lockout counts in the database (not needed yet; it would add a table, so everybody would have to rebuild `delta.db`, and the lockout tests in `test_app.py` would need updating)
 - try the reset email with a real mail account (the code is ready, see Turning on reset emails)
 - have the simulation save its sessions, maps and objects to the database
 - map view and picking which scan to look at (on hold until the simulation settles)

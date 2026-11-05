@@ -81,6 +81,7 @@ class AppTest(unittest.TestCase):
 
         main.SESSIONS.clear()
         main.FAILED_LOGINS.clear()
+        main.FAILED_BY_IP.clear()
         main.RESET_TOKENS.clear()
         self.client = TestClient(main.app)
 
@@ -199,13 +200,38 @@ class Lockout(AppTest):
 
     def test_the_lock_runs_out(self):
         self.wrong_tries(DEMO["email"], 5)
-        main.FAILED_LOGINS[DEMO["email"]]["locked_until"] = time.time() - 1
+        main.FAILED_LOGINS[("testclient", DEMO["email"])]["locked_until"] = time.time() - 1
         self.assertEqual(login(self.client, **DEMO).status_code, 200)
 
     def test_one_email_being_locked_does_not_lock_another(self):
         register(self.client, "other@example.com")
         self.wrong_tries(DEMO["email"], 5)
         self.assertEqual(login(self.client, "other@example.com", "secret123").status_code, 200)
+
+    def test_a_different_computer_is_not_locked_out(self):
+        self.wrong_tries(DEMO["email"], 5)  # locks this computer + this email
+        other_computer = TestClient(main.app, client=("10.0.0.2", 50000))
+        self.assertEqual(login(other_computer, **DEMO).status_code, 200)
+
+    def test_twenty_wrong_tries_from_one_computer_lock_that_computer(self):
+        for number in range(20):
+            wrong = login(self.client, f"nobody{number}@example.com", "wrong")
+            self.assertEqual(wrong.status_code, 401)
+        self.assertEqual(login(self.client, **DEMO).status_code, 429)  # even a real account
+
+        other_computer = TestClient(main.app, client=("10.0.0.2", 50000))
+        self.assertEqual(login(other_computer, **DEMO).status_code, 200)
+
+    def test_quiet_computers_are_forgotten(self):
+        self.wrong_tries(DEMO["email"], 2)
+        for table in (main.FAILED_LOGINS, main.FAILED_BY_IP):
+            for entry in table.values():
+                entry["last_try"] = time.time() - 3600  # an hour ago
+
+        login(self.client, "nobody@example.com", "wrong")  # any login attempt cleans up
+
+        self.assertNotIn(("testclient", DEMO["email"]), main.FAILED_LOGINS)
+        self.assertEqual(main.FAILED_BY_IP["testclient"]["count"], 1)  # started over
 
 
 class PasswordReset(AppTest):
