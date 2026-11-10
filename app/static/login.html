@@ -1,4 +1,41 @@
 <!DOCTYPE html>
+<!--
+=============================================================================
+  Login Page
+
+  Page        : login.html   (Design: Log in State Diagram)
+  Date        : Created 2026-10-09
+  Programmer  : Sebastian
+
+  DESCRIPTION
+    The first page of the website. Log in, recover a forgotten email or
+    password, and register a new account. Talks to the endpoints in
+    main.py; a successful login goes to the dashboard (/dashboard).
+
+  IMPORTANT FUNCTIONS (in the script at the bottom of the page)
+    show(screenId)                  switches to one screen of the diagram
+    send(url, body, form)           POSTs JSON; returns {ok, status, data},
+                                    or null after showing the Server Error Box
+    serverError(status, detail)     shows the Server Error Box
+    markField(form, name, text)     marks one bad input, with its message
+    One submit handler per form: log in, forgot email, forgot password,
+    registration.
+
+  IMPORTANT DATA STRUCTURES
+    SCREENS      the ids of the 8 <section>s, one per state of the diagram
+    FIELD_NAMES  input name -> label, for "Please fill out: ..." messages
+
+  ALGORITHMS
+    State machine: every state of the Log in State Diagram is one <section>;
+    show() hides all but one, and any element with data-go="<screen>" moves
+    to that screen. Chosen over separate pages because it mirrors the
+    diagram one-to-one and switches instantly without reloading.
+
+    Validation twice: empty fields are caught in the page before sending
+    (quick feedback), and the backend checks everything again, since a page
+    can be bypassed. The backend names every bad field, and each is marked.
+=============================================================================
+-->
 <html lang="en">
 
 <head>
@@ -247,6 +284,11 @@
       password_confirm: "Confirm password", phone_number: "Phone number",
     };
 
+    /**
+     * Shows one screen (a state of the diagram) and hides the others.
+     * Clears old errors and puts the cursor in the screen's first input.
+     * @param {string} screenId  id of the <section> to show, one of SCREENS
+     */
     function show(screenId) {
       for (const id of SCREENS) {
         document.getElementById(id).hidden = (id !== screenId);
@@ -258,12 +300,18 @@
       if (firstInput) firstInput.focus();
     }
 
+    /**
+     * Shows a message in an error box.
+     * @param {string} id    id of the error element
+     * @param {string} text  the message
+     */
     function showError(id, text) {
       const box = document.getElementById(id);
       box.textContent = text;
       box.hidden = false;
     }
 
+    /** Hides every error box and removes every field mark. */
     function clearErrors() {
       document.querySelectorAll(".error").forEach(box => { box.hidden = true; });
       document.querySelectorAll(".field-error").forEach(note => note.remove());
@@ -275,8 +323,15 @@
       el.addEventListener("click", () => show(el.dataset.go));
     });
 
-    // Sends JSON to the backend. Returns { ok, status, data }.
-    // A 500 or no connection at all goes straight to the Server Error Box.
+    /**
+     * POSTs JSON to the backend. The form's submit button is disabled meanwhile.
+     * A 500 or no connection at all goes straight to the Server Error Box.
+     * @param {string} url              the endpoint, e.g. "/api/login"
+     * @param {Object} body             sent as JSON
+     * @param {HTMLFormElement} form    the form being submitted
+     * @returns {Promise<{ok: boolean, status: number, data: Object}|null>}
+     *          the answer, or null if the Server Error Box was shown
+     */
     async function send(url, body, form) {
       const button = form.querySelector("button[type=submit]");
       button.disabled = true;
@@ -305,6 +360,11 @@
       }
     }
 
+    /**
+     * Shows the Server Error Box.
+     * @param {number|null} status  HTTP status, or null if the server was unreachable
+     * @param {string|Object} detail  the server's message, shown if it is text
+     */
     function serverError(status, detail) {
       show("server-error-box");
       document.getElementById("server-error-message").textContent =
@@ -389,6 +449,12 @@
     });
 
     // ---------- Registration ----------
+    /**
+     * Marks one registration input as wrong, with its message under it.
+     * @param {HTMLFormElement} form  the registration form
+     * @param {string} name           the input's name, e.g. "email"
+     * @param {string} [text]         the message; none just outlines the box
+     */
     function markField(form, name, text) {
       const input = form.elements[name];
       if (!input) return;
