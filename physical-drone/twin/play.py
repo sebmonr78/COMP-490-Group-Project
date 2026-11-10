@@ -15,7 +15,8 @@ corner, the keys and the mouse.
     Space         stop, hold here
     L             land                   F    the view follows the drone, or stays
     G             a gust from the side   C    view back on the drone
-    R             start again            H    hide / show this help
+    R             start again            D    chase cam (smoothly follows behind)
+                                         H    hide / show this help
     Esc           quit
 
 Like PX4's Position mode, a key asks for a speed and letting go stops the
@@ -201,6 +202,9 @@ class Pilot:
         self.gust_left = 0.5
 
 
+CAMERA_DISTANCE = 2.4          # metres: orbit radius used by _centre (C key) and chase cam
+CAMERA_ELEVATION = -18.0       # degrees: pitch/tilt used by _centre (C key) and chase cam
+
 class App:
     """The window: draws the twin, reads the keys and the mouse, runs the
     physics in step with the clock."""
@@ -223,7 +227,7 @@ class App:
         self.pick_option = mujoco.MjvOption()
         self.pick_option.geomgroup[GLASS] = 0
         self.camera = mujoco.MjvCamera()
-        self.camera.distance, self.camera.azimuth, self.camera.elevation = 2.4, 200.0, -18.0
+        self.camera.distance, self.camera.azimuth, self.camera.elevation = CAMERA_DISTANCE, 200.0, CAMERA_ELEVATION
         self.perturb = mujoco.MjvPerturb()
         self.twin.perturb = self.perturb
         # The mouse's spring, per kg of what is pushed: MuJoCo's 100 N/m let
@@ -233,6 +237,10 @@ class App:
 
         self.follow = True
         self.offset = np.zeros(3)               # the view's centre, from the drone
+        self.chase = False                       # D: third-person chase cam
+        self._chase_az = self.camera.azimuth    # smoothed azimuth for chase cam
+        self._chase_lookat = None               # smoothed lookat for chase cam
+        self._last_draw_time = time.perf_counter()
         self.help = True
         self.held = set()                       # keys down now
         self.buttons = set()                    # mouse buttons down now
@@ -272,6 +280,7 @@ class App:
             K.KEY_R: (self.restart, "Started again."),
             K.KEY_F: (self.toggle_follow, None),
             K.KEY_C: (self._centre, "View back on the drone."),
+            K.KEY_D: (self.toggle_chase, None),
             K.KEY_H: (self.toggle_help, None),
             K.KEY_ESCAPE: (self.quit, None),
         }
@@ -372,6 +381,7 @@ class App:
 
     def _centre(self):
         self.follow = True
+        self.chase = False
         self.offset = np.zeros(3)
         self.camera.lookat[:] = self._drone()
 
@@ -380,6 +390,68 @@ class App:
         if self.follow:
             self.offset = self.camera.lookat - self._drone()
         self.say("The view follows the drone." if self.follow else "The view stays put.")
+
+    def toggle_chase(self):
+        """Toggle the third-person chase camera on/off."""
+        self.chase = not self.chase
+        if self.chase:
+            # Seed smoothed state from the camera's current position so it
+            # glides in rather than teleporting.
+            self._chase_az = self.camera.azimuth
+            self._chase_lookat = self.camera.lookat.copy()
+            self.camera.distance = CAMERA_DISTANCE
+            self.camera.elevation = CAMERA_ELEVATION
+            self.say("Chase cam on (D to cancel).")
+        else:
+            # Hand control back to the normal follow / free-look system.
+            self.offset = self.camera.lookat - self._drone()
+            self.say("Chase cam off.")
+
+    def _update_chase(self, dt):
+        """Drive the camera each frame while chase mode is active.
+
+        Uses C's exact camera framing (focus/lookat directly on the drone,
+        pitch/tilt from CAMERA_ELEVATION, base distance from CAMERA_DISTANCE)
+        combined with D's chase/follow behavior (following the drone's yaw
+        smoothly from behind, damping position/lookat, and supporting zoom).
+
+        MuJoCo's azimuth convention: az=0 → camera is at world -x (not +x).
+        The camera offset from lookat is [-cos(az), -sin(az)].  For the camera
+        to sit *behind* the drone (at -forward), we need -cos(az) = -cos(yaw),
+        i.e. az = yaw (no +180 needed).
+        """
+        d = self.twin.data
+        drone_pos = self._drone()
+        yaw_rad = heading(d.qpos[3:7])
+
+        # --- azimuth: shortest-arc lerp toward drone_yaw ------------------
+        # MuJoCo places the camera at lookat + dist*[-cos(az), -sin(az)].
+        # We want the camera behind the drone (-forward direction), so az=yaw.
+        target_az = math.degrees(yaw_rad) % 360.0
+        diff = (target_az - self._chase_az + 180.0) % 360.0 - 180.0
+        self._chase_az = (self._chase_az + diff * min(1.0, 6.0 * dt)) % 360.0
+        self.camera.azimuth = self._chase_az
+
+        # --- pitch/tilt: maintain C's exact elevation ---------------------
+        self.camera.elevation = CAMERA_ELEVATION
+
+        # --- lookat: directly on the drone (matches C's focus point) ------
+        target_lookat = drone_pos.copy()
+
+        # Clamp camera.distance so scroll zoom works but stays sensible:
+        #   minimum keeps camera from clipping into drone;
+        #   maximum keeps it from flying out to infinity.
+        # We do NOT hard-set the distance here — the scroll wheel (on_scroll →
+        # mjv_moveCamera ZOOM) modifies camera.distance freely between frames.
+        self.camera.distance = max(0.5, min(self.camera.distance, 20.0))
+
+        if self._chase_lookat is None:
+            self._chase_lookat = target_lookat.copy()
+        self._chase_lookat += (target_lookat - self._chase_lookat) * min(1.0, 8.0 * dt)
+        self.camera.lookat[:] = self._chase_lookat
+
+        # Keep offset in sync so turning chase off hands back a sane offset.
+        self.offset = self.camera.lookat - drone_pos
 
     def toggle_help(self):
         self.help = not self.help
@@ -427,7 +499,12 @@ class App:
 
     def draw(self):
         m, d = self.twin.model, self.twin.data
-        if self.follow:
+        now = time.perf_counter()
+        dt = min(now - self._last_draw_time, 0.1)   # cap so a pause doesn't jerk
+        self._last_draw_time = now
+        if self.chase:
+            self._update_chase(dt)
+        elif self.follow:
             self.camera.lookat[:] = self._drone() + self.offset
 
         width, height = glfw.get_framebuffer_size(self.window)
@@ -517,10 +594,10 @@ KEY_NAMES = {K.KEY_UP: "Up", K.KEY_DOWN: "Down", K.KEY_LEFT: "Left", K.KEY_RIGHT
              K.KEY_LEFT_CONTROL: "Ctrl", K.KEY_RIGHT_CONTROL: "Ctrl"}
 
 HELP_KEYS = "\n".join(["Up / Down", "Left / Right", "1 / 0", "Shift", "Space   L   G   R",
-                       "F   C   H   Esc", "", "left drag", "right drag", "scroll",
+                       "F   C   D   H   Esc", "", "left drag", "right drag", "scroll",
                        "double-click", "Ctrl + right drag", "Ctrl + left drag"])
 HELP_DOES = "\n".join(["forward / back", "turn", "up / down (1 on the floor: take off)", "faster",
-                       "stop   land   gust   start again", "follow   centre view   help   quit", "",
+                       "stop   land   gust   start again", "follow   centre   chase cam   help   quit", "",
                        "turn the view", "slide the view", "zoom", "pick a thing (again: let go)",
                        "push what is picked", "twist it"])
 
