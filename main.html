@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Python: Python: main (login and registration)</title>
+<link rel="stylesheet" type="text/css" href="_pydoc.css">
+</head><body>
+
+<table class="heading">
+<tr class="heading-text decor">
+<td class="title">&nbsp;<br><strong class="title">main</strong> &mdash; Login, Recovery and Registration</td>
+<td class="extra"><a href=".">index</a><br><a href="../../app/main.py">app/main.py</a></td></tr></table>
+    <p><tt>=============================================================================<br>
+Login, Recovery and Registration<br>
+<br>
+Component&nbsp;  : Login &amp; Registration endpoints&nbsp;  (Design: Log in State Diagram,<br>
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &quot;Backend DB&quot; boxes)<br>
+Date&nbsp; &nbsp; &nbsp; &nbsp; : Created 2026-10-19, last updated 2026-10-26<br>
+Programmer&nbsp; : Sebastian<br>
+<br>
+DESCRIPTION<br>
+&nbsp; The backend half of the login page (static/login.html). Logs users in,<br>
+&nbsp; finds a forgotten email from a phone number, starts a password reset,<br>
+&nbsp; and creates accounts. Any database failure comes back as a 500, which<br>
+&nbsp; the page shows as the Server Error Box.<br>
+<br>
+IMPORTANT FUNCTIONS<br>
+&nbsp; login(LoginInfo) -&gt; {&quot;user_id&quot;, &quot;first_name&quot;}&nbsp; &nbsp; &nbsp;  POST /api/login<br>
+&nbsp; &nbsp; &nbsp; Checks email + password; on success sets the session cookie.<br>
+&nbsp; &nbsp; &nbsp; 401 wrong email or password, 429 locked after too many wrong tries.<br>
+&nbsp; recover_email(PhoneInfo) -&gt; {&quot;email&quot;}&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;  POST /api/recover-email<br>
+&nbsp; &nbsp; &nbsp; The account email for a phone number; 404 if none.<br>
+&nbsp; recover_password(PasswordRecoveryInfo) -&gt; {&quot;message&quot;}&nbsp; POST /api/recover-password<br>
+&nbsp; &nbsp; &nbsp; Email + phone must match one account; sends a one-time reset link.<br>
+&nbsp; register(RegistrationInfo) -&gt; {&quot;message&quot;}&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;  POST /api/register (201)<br>
+&nbsp; &nbsp; &nbsp; Validates every field, rejects taken email/phone, stores the account<br>
+&nbsp; &nbsp; &nbsp; with a hashed password. 400 missing or invalid, 409 already taken.<br>
+<br>
+IMPORTANT DATA STRUCTURES<br>
+&nbsp; LoginInfo, PhoneInfo, PasswordRecoveryInfo, RegistrationInfo<br>
+&nbsp; &nbsp; &nbsp; Pydantic models: the JSON body each endpoint accepts.<br>
+&nbsp; SESSIONS : dict[token -&gt; (user_id, expires_at)]<br>
+&nbsp; &nbsp; &nbsp; Logged-in sessions; the token is the browser&#x27;s session cookie.<br>
+&nbsp; Error detail {&quot;message&quot;: str, &quot;fields&quot;: list | dict}<br>
+&nbsp; &nbsp; &nbsp; Names every bad field at once, so the page can mark each box.<br>
+<br>
+ALGORITHMS<br>
+&nbsp; Session tokens: 32 random bytes (secrets.token_urlsafe) kept in a<br>
+&nbsp; server-side dict with an expiry time. Chosen over signed tokens (JWT)<br>
+&nbsp; because a session can be ended at once (logout, password reset) and there<br>
+&nbsp; is no signing key to manage; the cost is that a restart logs everyone out.<br>
+<br>
+&nbsp; Normalisation before lookup: emails trimmed and lower-cased, phone numbers<br>
+&nbsp; reduced to digits, so &quot;(555) 555-0100&quot; and &quot;555.555.0100&quot; match.<br>
+<br>
+&nbsp; One message for a wrong email and a wrong password, so the page does not<br>
+&nbsp; reveal which emails have accounts.<br>
+<br>
+&nbsp; Passwords are stored only as PBKDF2 hashes (see database/passwords.py).<br>
+=============================================================================</tt></p><p>
+<table class="section">
+<tr class="decor index-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Classes</strong></td></tr>
+    
+<tr><td class="decor index-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><dl><dt><a name="LoginInfo"><strong>LoginInfo</strong></a>(pydantic.BaseModel)</dt><dd><span class="code">Body of POST /api/login: the email and password typed on the login page.</span><dl><dt><tt>email</tt>: str = ""</dt><dt><tt>password</tt>: str = ""</dt></dl></dd></dl>
+<dl><dt><a name="PhoneInfo"><strong>PhoneInfo</strong></a>(pydantic.BaseModel)</dt><dd><span class="code">Body of POST /api/recover-email: the phone number on the account.</span><dl><dt><tt>phone_number</tt>: str = ""</dt></dl></dd></dl>
+<dl><dt><a name="PasswordRecoveryInfo"><strong>PasswordRecoveryInfo</strong></a>(pydantic.BaseModel)</dt><dd><span class="code">Body of POST /api/recover-password: the account&#x27;s email and phone number.</span><dl><dt><tt>email</tt>: str = ""</dt><dt><tt>phone_number</tt>: str = ""</dt></dl></dd></dl>
+<dl><dt><a name="RegistrationInfo"><strong>RegistrationInfo</strong></a>(pydantic.BaseModel)</dt><dd><span class="code">Body of POST /api/register: every field of the registration form.</span><dl><dt><tt>first_name</tt>: str = ""</dt><dt><tt>last_name</tt>: str = ""</dt><dt><tt>email</tt>: str = ""</dt><dt><tt>email_confirm</tt>: str = ""</dt><dt><tt>password</tt>: str = ""</dt><dt><tt>password_confirm</tt>: str = ""</dt><dt><tt>phone_number</tt>: str = ""</dt></dl></dd></dl></td></tr></table><p>
+<table class="section">
+<tr class="decor functions-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Functions</strong></td></tr>
+    
+<tr><td class="decor functions-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><dl><dt><a name="-login"><strong>login</strong></a>(info: main.LoginInfo, response: starlette.responses.Response)</dt><dd><span class="code">POST&nbsp;/api/login:&nbsp;logs&nbsp;a&nbsp;user&nbsp;in.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;info&nbsp;(LoginInfo):&nbsp;email&nbsp;and&nbsp;password.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;response:&nbsp;used&nbsp;to&nbsp;set&nbsp;the&nbsp;session&nbsp;cookie.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict:&nbsp;{"user_id",&nbsp;"first_name"};&nbsp;the&nbsp;browser&nbsp;gets&nbsp;the&nbsp;session&nbsp;cookie,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;valid&nbsp;for&nbsp;SESSION_HOURS.<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HTTPException:&nbsp;401&nbsp;wrong&nbsp;email&nbsp;or&nbsp;password&nbsp;(one&nbsp;message&nbsp;for&nbsp;both),<br>
+&nbsp;&nbsp;&nbsp;&nbsp;429&nbsp;locked&nbsp;after&nbsp;MAX_LOGIN_FAILURES&nbsp;wrong&nbsp;tries,&nbsp;500&nbsp;database&nbsp;error.</span></dd></dl>
+
+<dl><dt><a name="-recover_email"><strong>recover_email</strong></a>(info: main.PhoneInfo)</dt><dd><span class="code">POST&nbsp;/api/recover-email:&nbsp;finds&nbsp;the&nbsp;account&nbsp;email&nbsp;for&nbsp;a&nbsp;phone&nbsp;number.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;info&nbsp;(PhoneInfo):&nbsp;the&nbsp;phone&nbsp;number,&nbsp;in&nbsp;any&nbsp;format.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict:&nbsp;{"email":&nbsp;the&nbsp;account's&nbsp;email}.<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HTTPException:&nbsp;404&nbsp;no&nbsp;account&nbsp;has&nbsp;that&nbsp;number,&nbsp;500&nbsp;database&nbsp;error.</span></dd></dl>
+
+<dl><dt><a name="-recover_password"><strong>recover_password</strong></a>(info: main.PasswordRecoveryInfo)</dt><dd><span class="code">POST&nbsp;/api/recover-password:&nbsp;starts&nbsp;a&nbsp;password&nbsp;reset.<br>
+&nbsp;<br>
+The&nbsp;email&nbsp;and&nbsp;phone&nbsp;number&nbsp;must&nbsp;belong&nbsp;to&nbsp;the&nbsp;same&nbsp;account.&nbsp;A&nbsp;one-time<br>
+reset&nbsp;link,&nbsp;valid&nbsp;for&nbsp;RESET_MINUTES,&nbsp;is&nbsp;emailed&nbsp;(see&nbsp;mailer.py),&nbsp;or<br>
+printed&nbsp;in&nbsp;the&nbsp;server&nbsp;terminal&nbsp;if&nbsp;email&nbsp;is&nbsp;not&nbsp;set&nbsp;up.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;info&nbsp;(PasswordRecoveryInfo):&nbsp;email&nbsp;and&nbsp;phone&nbsp;number.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict:&nbsp;{"message":&nbsp;confirmation&nbsp;that&nbsp;the&nbsp;email&nbsp;was&nbsp;sent}.<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HTTPException:&nbsp;404&nbsp;no&nbsp;matching&nbsp;account,&nbsp;500&nbsp;database&nbsp;or&nbsp;mail&nbsp;error.</span></dd></dl>
+
+<dl><dt><a name="-register"><strong>register</strong></a>(info: main.RegistrationInfo)</dt><dd><span class="code">POST&nbsp;/api/register:&nbsp;creates&nbsp;an&nbsp;account.<br>
+&nbsp;<br>
+Checks,&nbsp;in&nbsp;order:&nbsp;every&nbsp;field&nbsp;is&nbsp;filled&nbsp;in;&nbsp;the&nbsp;email&nbsp;is&nbsp;valid&nbsp;and&nbsp;both<br>
+emails&nbsp;match;&nbsp;the&nbsp;password&nbsp;is&nbsp;at&nbsp;least&nbsp;MIN_PASSWORD_LENGTH&nbsp;characters&nbsp;and<br>
+both&nbsp;passwords&nbsp;match;&nbsp;the&nbsp;phone&nbsp;number&nbsp;has&nbsp;10&nbsp;to&nbsp;15&nbsp;digits;&nbsp;the&nbsp;email&nbsp;and<br>
+phone&nbsp;number&nbsp;are&nbsp;not&nbsp;already&nbsp;used.&nbsp;The&nbsp;password&nbsp;is&nbsp;stored&nbsp;hashed.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;info&nbsp;(RegistrationInfo):&nbsp;the&nbsp;registration&nbsp;form.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict:&nbsp;{"message":&nbsp;"Account&nbsp;created"}&nbsp;(HTTP&nbsp;201).<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HTTPException:&nbsp;400&nbsp;missing&nbsp;or&nbsp;invalid&nbsp;fields,&nbsp;409&nbsp;email&nbsp;or&nbsp;phone<br>
+&nbsp;&nbsp;&nbsp;&nbsp;already&nbsp;taken,&nbsp;500&nbsp;database&nbsp;error.&nbsp;400&nbsp;and&nbsp;409&nbsp;carry<br>
+&nbsp;&nbsp;&nbsp;&nbsp;{"message",&nbsp;"fields"}&nbsp;naming&nbsp;each&nbsp;bad&nbsp;field.</span></dd></dl>
+
+<dl><dt><a name="-clean_email"><strong>clean_email</strong></a>(email)</dt><dd><span class="code">Trims&nbsp;and&nbsp;lower-cases&nbsp;an&nbsp;email,&nbsp;so&nbsp;lookups&nbsp;ignore&nbsp;case&nbsp;and&nbsp;spaces.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;email&nbsp;(str):&nbsp;as&nbsp;typed.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;str:&nbsp;the&nbsp;normalised&nbsp;email.</span></dd></dl>
+
+<dl><dt><a name="-clean_phone"><strong>clean_phone</strong></a>(phone)</dt><dd><span class="code">Keeps&nbsp;only&nbsp;the&nbsp;digits&nbsp;of&nbsp;a&nbsp;phone&nbsp;number.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;phone&nbsp;(str):&nbsp;as&nbsp;typed,&nbsp;e.g.&nbsp;"(555)&nbsp;555-0100".<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;str:&nbsp;e.g.&nbsp;"5555550100".</span></dd></dl>
+
+<dl><dt><a name="-run"><strong>run</strong></a>(sql, params=())</dt><dd><span class="code">Runs&nbsp;one&nbsp;query,&nbsp;turning&nbsp;a&nbsp;database&nbsp;failure&nbsp;into&nbsp;a&nbsp;500&nbsp;for&nbsp;the&nbsp;Server&nbsp;Error&nbsp;Box.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;sql&nbsp;(str):&nbsp;the&nbsp;query,&nbsp;with&nbsp;?&nbsp;placeholders.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;params&nbsp;(tuple):&nbsp;values&nbsp;for&nbsp;the&nbsp;placeholders.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;list[dict]:&nbsp;the&nbsp;rows.<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HTTPException(500):&nbsp;the&nbsp;database&nbsp;could&nbsp;not&nbsp;be&nbsp;reached.</span></dd></dl>
+
+<dl><dt><a name="-login_page"><strong>login_page</strong></a>()</dt><dd><span class="code">GET&nbsp;/login:&nbsp;the&nbsp;login&nbsp;page&nbsp;(static/login.html).</span></dd></dl>
+</td></tr></table>
+</body></html>

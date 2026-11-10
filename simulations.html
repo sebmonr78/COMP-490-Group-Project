@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Python: module simulations</title>
+<link rel="stylesheet" type="text/css" href="_pydoc.css">
+</head><body>
+
+<table class="heading">
+<tr class="heading-text decor">
+<td class="title">&nbsp;<br><strong class="title">simulations</strong></td>
+<td class="extra"><a href=".">index</a><br><a href="../../app/simulations.py">app/simulations.py</a></td></tr></table>
+    <p><span class="code">Simulation&nbsp;Manager:&nbsp;starts,&nbsp;tracks&nbsp;and&nbsp;stops&nbsp;the&nbsp;simulations&nbsp;for&nbsp;the&nbsp;web&nbsp;dashboard.<br>
+&nbsp;<br>
+Module&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;simulations.py&nbsp;&nbsp;&nbsp;(Design:&nbsp;Simulation&nbsp;Manager)<br>
+Date&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;Created&nbsp;2026-10-21,&nbsp;last&nbsp;updated&nbsp;2026-11-02<br>
+Programmer&nbsp;&nbsp;:&nbsp;Sebastian<br>
+&nbsp;<br>
+DESCRIPTION<br>
+&nbsp;&nbsp;&nbsp;&nbsp;The&nbsp;web&nbsp;app&nbsp;and&nbsp;the&nbsp;simulations&nbsp;need&nbsp;different&nbsp;Pythons:&nbsp;the&nbsp;app&nbsp;runs&nbsp;in<br>
+&nbsp;&nbsp;&nbsp;&nbsp;its&nbsp;own&nbsp;venv,&nbsp;Habitat&nbsp;exists&nbsp;only&nbsp;in&nbsp;the&nbsp;`habitat`&nbsp;conda&nbsp;env,&nbsp;and&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;physics&nbsp;twin&nbsp;needs&nbsp;Python&nbsp;3.10+&nbsp;with&nbsp;MuJoCo.&nbsp;So&nbsp;this&nbsp;module&nbsp;imports&nbsp;none<br>
+&nbsp;&nbsp;&nbsp;&nbsp;of&nbsp;them.&nbsp;It&nbsp;starts&nbsp;each&nbsp;simulation&nbsp;as&nbsp;a&nbsp;separate&nbsp;process,&nbsp;the&nbsp;same&nbsp;way&nbsp;it<br>
+&nbsp;&nbsp;&nbsp;&nbsp;would&nbsp;be&nbsp;started&nbsp;from&nbsp;a&nbsp;terminal,&nbsp;keeps&nbsp;its&nbsp;output&nbsp;for&nbsp;the&nbsp;page,&nbsp;and<br>
+&nbsp;&nbsp;&nbsp;&nbsp;serves&nbsp;the&nbsp;endpoints&nbsp;under&nbsp;/api/simulations.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Only&nbsp;the&nbsp;simulations&nbsp;listed&nbsp;in&nbsp;SIMULATIONS&nbsp;can&nbsp;be&nbsp;started.&nbsp;The&nbsp;page&nbsp;sends<br>
+&nbsp;&nbsp;&nbsp;&nbsp;an&nbsp;id,&nbsp;never&nbsp;a&nbsp;path&nbsp;or&nbsp;a&nbsp;command,&nbsp;so&nbsp;nothing&nbsp;else&nbsp;can&nbsp;be&nbsp;run&nbsp;through&nbsp;it.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Each&nbsp;login&nbsp;session&nbsp;(one&nbsp;account&nbsp;on&nbsp;one&nbsp;device)&nbsp;gets&nbsp;its&nbsp;own&nbsp;run.&nbsp;A<br>
+&nbsp;&nbsp;&nbsp;&nbsp;session&nbsp;runs&nbsp;one&nbsp;simulation&nbsp;at&nbsp;a&nbsp;time,&nbsp;and&nbsp;the&nbsp;server&nbsp;runs&nbsp;at&nbsp;most<br>
+&nbsp;&nbsp;&nbsp;&nbsp;DELTA_MAX_SIMULATIONS&nbsp;(default&nbsp;3)&nbsp;across&nbsp;everyone,&nbsp;because&nbsp;the&nbsp;Habitat<br>
+&nbsp;&nbsp;&nbsp;&nbsp;simulations&nbsp;share&nbsp;one&nbsp;GPU.<br>
+&nbsp;<br>
+IMPORTANT&nbsp;FUNCTIONS<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#-start_simulation">start_simulation</a>(sim_id,&nbsp;request,&nbsp;where="browser")&nbsp;-&gt;&nbsp;dict<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;POST&nbsp;/api/simulations/{sim_id}/start.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;In&nbsp;:&nbsp;simulation&nbsp;id,&nbsp;the&nbsp;caller's&nbsp;session&nbsp;cookie,&nbsp;and&nbsp;where&nbsp;its<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;window&nbsp;opens&nbsp;("browser"&nbsp;or&nbsp;"server").<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Out:&nbsp;summary&nbsp;of&nbsp;the&nbsp;new&nbsp;run&nbsp;(see&nbsp;_summary).<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Errors:&nbsp;404&nbsp;unknown&nbsp;id,&nbsp;409&nbsp;already&nbsp;running,&nbsp;503&nbsp;server&nbsp;full&nbsp;or<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;something&nbsp;not&nbsp;installed.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#-stop_simulation">stop_simulation</a>(request)&nbsp;-&gt;&nbsp;dict<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;POST&nbsp;/api/simulations/stop.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;In&nbsp;:&nbsp;the&nbsp;caller's&nbsp;session&nbsp;cookie.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Out:&nbsp;{"message":&nbsp;"Stopping"};&nbsp;the&nbsp;run&nbsp;stops&nbsp;in&nbsp;the&nbsp;background.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#-current_run">current_run</a>(request,&nbsp;since=0)&nbsp;-&gt;&nbsp;dict<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;GET&nbsp;/api/simulations/run,&nbsp;polled&nbsp;by&nbsp;the&nbsp;page&nbsp;once&nbsp;a&nbsp;second.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;In&nbsp;:&nbsp;session&nbsp;cookie;&nbsp;how&nbsp;many&nbsp;output&nbsp;lines&nbsp;the&nbsp;page&nbsp;already&nbsp;has.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Out:&nbsp;{"run":&nbsp;summary&nbsp;with&nbsp;only&nbsp;the&nbsp;newer&nbsp;lines,&nbsp;or&nbsp;None}.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#-list_simulations">list_simulations</a>(request)&nbsp;-&gt;&nbsp;list[dict]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;GET&nbsp;/api/simulations.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Out:&nbsp;one&nbsp;entry&nbsp;per&nbsp;simulation:&nbsp;id,&nbsp;title,&nbsp;description,&nbsp;whether&nbsp;it&nbsp;is<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;running,&nbsp;and&nbsp;whether&nbsp;the&nbsp;in-browser&nbsp;view&nbsp;is&nbsp;available.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#-stop_for_session">stop_for_session</a>(token)&nbsp;-&gt;&nbsp;None<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Called&nbsp;by&nbsp;main.py&nbsp;on&nbsp;logout&nbsp;or&nbsp;login&nbsp;expiry:&nbsp;stops&nbsp;that&nbsp;session's&nbsp;run.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#-stop_on_shutdown">stop_on_shutdown</a>()&nbsp;-&gt;&nbsp;None<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Called&nbsp;when&nbsp;uvicorn&nbsp;shuts&nbsp;down:&nbsp;stops&nbsp;every&nbsp;run&nbsp;and&nbsp;its&nbsp;screen.<br>
+&nbsp;<br>
+IMPORTANT&nbsp;DATA&nbsp;STRUCTURES<br>
+&nbsp;&nbsp;&nbsp;&nbsp;SIMULATIONS&nbsp;:&nbsp;dict[str,&nbsp;dict]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The&nbsp;catalogue&nbsp;of&nbsp;what&nbsp;can&nbsp;run:&nbsp;id&nbsp;-&gt;&nbsp;kind&nbsp;("habitat",&nbsp;"command"&nbsp;or<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"twin"),&nbsp;title,&nbsp;what&nbsp;to&nbsp;run,&nbsp;and&nbsp;options&nbsp;(interactive,&nbsp;stop_seconds,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;results).<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;_runs&nbsp;:&nbsp;dict[str,&nbsp;dict]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Session&nbsp;token&nbsp;-&gt;&nbsp;that&nbsp;session's&nbsp;current&nbsp;or&nbsp;last&nbsp;run.&nbsp;A&nbsp;run&nbsp;holds&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;process,&nbsp;its&nbsp;status&nbsp;("starting",&nbsp;"running",&nbsp;"stopping",&nbsp;"stopped",<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"finished"&nbsp;or&nbsp;"failed"),&nbsp;output,&nbsp;slot,&nbsp;virtual&nbsp;screen&nbsp;and&nbsp;viewer.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Guarded&nbsp;by&nbsp;_lock,&nbsp;since&nbsp;output-reader&nbsp;threads&nbsp;and&nbsp;requests&nbsp;share&nbsp;it.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;run["lines"]&nbsp;:&nbsp;collections.deque(maxlen=MAX_LINES)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The&nbsp;last&nbsp;2000&nbsp;lines&nbsp;of&nbsp;output;&nbsp;run["line_count"]&nbsp;counts&nbsp;all&nbsp;of&nbsp;them.<br>
+&nbsp;<br>
+ALGORITHMS<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Slot&nbsp;allocation&nbsp;(first&nbsp;fit)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Each&nbsp;run&nbsp;takes&nbsp;the&nbsp;lowest&nbsp;free&nbsp;slot&nbsp;number&nbsp;(1..DELTA_MAX_SIMULATIONS).<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Everything&nbsp;two&nbsp;runs&nbsp;must&nbsp;not&nbsp;share&nbsp;comes&nbsp;from&nbsp;it:&nbsp;viewer&nbsp;port<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;6080&nbsp;+&nbsp;slot&nbsp;-&nbsp;1,&nbsp;DELTA's&nbsp;brain&nbsp;port&nbsp;47600&nbsp;+&nbsp;slot&nbsp;-&nbsp;1,&nbsp;and&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;web-&lt;slot&gt;&nbsp;map&nbsp;and&nbsp;results&nbsp;folders.&nbsp;Chosen&nbsp;over&nbsp;asking&nbsp;the&nbsp;OS&nbsp;for<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;random&nbsp;free&nbsp;ports&nbsp;because&nbsp;the&nbsp;ports&nbsp;stay&nbsp;predictable&nbsp;(a&nbsp;firewall<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;rule&nbsp;can&nbsp;list&nbsp;them)&nbsp;and&nbsp;are&nbsp;reused,&nbsp;and&nbsp;the&nbsp;fixed&nbsp;pool&nbsp;doubles&nbsp;as<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;the&nbsp;GPU&nbsp;limit.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Output&nbsp;ring&nbsp;buffer&nbsp;with&nbsp;a&nbsp;cursor<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Output&nbsp;goes&nbsp;into&nbsp;a&nbsp;bounded&nbsp;deque,&nbsp;plus&nbsp;a&nbsp;total&nbsp;line&nbsp;count.&nbsp;The&nbsp;page<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;asks&nbsp;for&nbsp;lines&nbsp;"since"&nbsp;the&nbsp;count&nbsp;it&nbsp;already&nbsp;has,&nbsp;so&nbsp;each&nbsp;poll&nbsp;only<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;downloads&nbsp;new&nbsp;lines&nbsp;and&nbsp;memory&nbsp;stays&nbsp;fixed&nbsp;however&nbsp;long&nbsp;a&nbsp;run&nbsp;lasts.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Chosen&nbsp;over&nbsp;WebSocket&nbsp;streaming&nbsp;because&nbsp;once-a-second&nbsp;HTTP&nbsp;polling&nbsp;is<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;simpler&nbsp;and&nbsp;works&nbsp;on&nbsp;any&nbsp;network&nbsp;the&nbsp;page&nbsp;itself&nbsp;works&nbsp;on.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Two-phase&nbsp;start<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;A&nbsp;slot&nbsp;is&nbsp;claimed&nbsp;while&nbsp;holding&nbsp;the&nbsp;lock;&nbsp;the&nbsp;slow&nbsp;work&nbsp;(virtual<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;screen,&nbsp;process&nbsp;start)&nbsp;happens&nbsp;after&nbsp;it&nbsp;is&nbsp;released,&nbsp;so&nbsp;other&nbsp;users'<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;polling&nbsp;is&nbsp;never&nbsp;blocked&nbsp;while&nbsp;a&nbsp;run&nbsp;starts.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Graceful&nbsp;stop<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;SIGTERM&nbsp;to&nbsp;the&nbsp;run's&nbsp;whole&nbsp;process&nbsp;group,&nbsp;wait&nbsp;up&nbsp;to&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;simulation's&nbsp;stop_seconds,&nbsp;then&nbsp;SIGKILL.&nbsp;The&nbsp;group&nbsp;also&nbsp;catches&nbsp;what<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`conda&nbsp;run`&nbsp;started;&nbsp;the&nbsp;wait&nbsp;lets&nbsp;DELTA&nbsp;save&nbsp;its&nbsp;map&nbsp;first.<br>
+&nbsp;<br>
+SETTINGS&nbsp;(environment&nbsp;variables,&nbsp;all&nbsp;optional)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;DELTA_CONDA_ENV&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;conda&nbsp;env&nbsp;for&nbsp;the&nbsp;Habitat&nbsp;scripts&nbsp;(default:&nbsp;from&nbsp;project.json)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;DELTA_SIM_PYTHON&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;a&nbsp;Python&nbsp;to&nbsp;use&nbsp;instead&nbsp;of&nbsp;`conda&nbsp;run`<br>
+&nbsp;&nbsp;&nbsp;&nbsp;DELTA_MAX_SIMULATIONS&nbsp;&nbsp;&nbsp;how&nbsp;many&nbsp;can&nbsp;run&nbsp;at&nbsp;once,&nbsp;across&nbsp;everyone&nbsp;(default&nbsp;3)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;DELTA_TWIN_PYTHON&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;the&nbsp;physics&nbsp;twin's&nbsp;Python&nbsp;(default:&nbsp;physical-drone/venv,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;else&nbsp;the&nbsp;conda&nbsp;env&nbsp;`twin`)</span></p>
+<p>
+<table class="section">
+<tr class="decor pkg-content-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Modules</strong></td></tr>
+    
+<tr><td class="decor pkg-content-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><table><tr><td class="multicolumn">atexit<br>
+json<br>
+os<br>
+</td><td class="multicolumn">shutil<br>
+signal<br>
+subprocess<br>
+</td><td class="multicolumn">sys<br>
+threading<br>
+<a href="virtual_screen.html">virtual_screen</a><br>
+</td><td class="multicolumn"></td></tr></table></td></tr></table><p>
+<table class="section">
+<tr class="decor functions-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Functions</strong></td></tr>
+    
+<tr><td class="decor functions-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><dl><dt><a name="-conda_env_name"><strong>conda_env_name</strong></a>()</dt><dd><span class="code">The&nbsp;conda&nbsp;env&nbsp;the&nbsp;Habitat&nbsp;scripts&nbsp;run&nbsp;in.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;str:&nbsp;DELTA_CONDA_ENV&nbsp;if&nbsp;set,&nbsp;else&nbsp;the&nbsp;env&nbsp;simulation/config/project.json<br>
+&nbsp;&nbsp;&nbsp;&nbsp;names,&nbsp;else&nbsp;"habitat".</span></dd></dl>
+ <dl><dt><a name="-conda_executable"><strong>conda_executable</strong></a>()</dt><dd><span class="code">Path&nbsp;to&nbsp;the&nbsp;conda&nbsp;program,&nbsp;or&nbsp;None&nbsp;if&nbsp;conda&nbsp;cannot&nbsp;be&nbsp;found.<br>
+&nbsp;<br>
+conda&nbsp;sets&nbsp;CONDA_EXE&nbsp;when&nbsp;it&nbsp;is&nbsp;initialised&nbsp;in&nbsp;the&nbsp;shell;&nbsp;otherwise&nbsp;PATH<br>
+is&nbsp;searched.</span></dd></dl>
+ <dl><dt><a name="-current_run"><strong>current_run</strong></a>(request: starlette.requests.Request, since: int = 0)</dt><dd><span class="code">GET&nbsp;/api/simulations/run:&nbsp;this&nbsp;session's&nbsp;current&nbsp;or&nbsp;last&nbsp;run.<br>
+&nbsp;<br>
+The&nbsp;page&nbsp;polls&nbsp;this&nbsp;once&nbsp;a&nbsp;second.&nbsp;Each&nbsp;session&nbsp;only&nbsp;sees&nbsp;its&nbsp;own&nbsp;run.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;request:&nbsp;the&nbsp;caller's&nbsp;request&nbsp;(its&nbsp;session&nbsp;cookie).<br>
+&nbsp;&nbsp;&nbsp;&nbsp;since&nbsp;(int):&nbsp;how&nbsp;many&nbsp;output&nbsp;lines&nbsp;the&nbsp;page&nbsp;already&nbsp;has,&nbsp;so&nbsp;only<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;newer&nbsp;ones&nbsp;are&nbsp;sent.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict:&nbsp;{"run":&nbsp;summary&nbsp;(see&nbsp;_summary)&nbsp;or&nbsp;None}.</span></dd></dl>
+ <dl><dt><a name="-list_simulations"><strong>list_simulations</strong></a>(request: starlette.requests.Request)</dt><dd><span class="code">GET&nbsp;/api/simulations:&nbsp;what&nbsp;the&nbsp;page&nbsp;can&nbsp;run.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;request:&nbsp;the&nbsp;caller's&nbsp;request&nbsp;(its&nbsp;session&nbsp;cookie).<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;list[dict]:&nbsp;per&nbsp;simulation:&nbsp;id,&nbsp;title,&nbsp;description,&nbsp;interactive,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;running&nbsp;(for&nbsp;this&nbsp;session),&nbsp;newer,&nbsp;browser_ready,&nbsp;browser_missing.</span></dd></dl>
+ <dl><dt><a name="-max_running"><strong>max_running</strong></a>()</dt><dd><span class="code">How&nbsp;many&nbsp;simulations&nbsp;may&nbsp;run&nbsp;at&nbsp;once&nbsp;on&nbsp;the&nbsp;whole&nbsp;server.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;int:&nbsp;DELTA_MAX_SIMULATIONS,&nbsp;at&nbsp;least&nbsp;1;&nbsp;3&nbsp;if&nbsp;it&nbsp;is&nbsp;unset&nbsp;or&nbsp;not&nbsp;a&nbsp;number.</span></dd></dl>
+ <dl><dt><a name="-python_command"><strong>python_command</strong></a>()</dt><dd><span class="code">The&nbsp;command&nbsp;that&nbsp;starts&nbsp;Python&nbsp;inside&nbsp;the&nbsp;Habitat&nbsp;env.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;list[str]&nbsp;|&nbsp;None:&nbsp;DELTA_SIM_PYTHON&nbsp;if&nbsp;set,&nbsp;else&nbsp;`conda&nbsp;run`&nbsp;in&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Habitat&nbsp;env,&nbsp;or&nbsp;None&nbsp;when&nbsp;neither&nbsp;is&nbsp;available.</span></dd></dl>
+ <dl><dt><a name="-run_picture"><strong>run_picture</strong></a>(request: starlette.requests.Request, number: int)</dt><dd><span class="code">GET&nbsp;/api/simulations/run/picture:&nbsp;the&nbsp;physics&nbsp;twin's&nbsp;flight&nbsp;plot.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;request:&nbsp;the&nbsp;caller's&nbsp;request&nbsp;(its&nbsp;session&nbsp;cookie).<br>
+&nbsp;&nbsp;&nbsp;&nbsp;number&nbsp;(int):&nbsp;the&nbsp;run&nbsp;number&nbsp;the&nbsp;page&nbsp;is&nbsp;showing.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;FileResponse:&nbsp;flight.png&nbsp;of&nbsp;this&nbsp;session's&nbsp;own&nbsp;run.<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HTTPException(404):&nbsp;no&nbsp;such&nbsp;run&nbsp;for&nbsp;this&nbsp;session,&nbsp;or&nbsp;it&nbsp;has&nbsp;no&nbsp;plot.</span></dd></dl>
+ <dl><dt><a name="-simulation_environment"><strong>simulation_environment</strong></a>()</dt><dd><span class="code">The&nbsp;environment&nbsp;variables&nbsp;a&nbsp;simulation&nbsp;runs&nbsp;with.<br>
+&nbsp;<br>
+uvicorn&nbsp;runs&nbsp;inside&nbsp;the&nbsp;app's&nbsp;venv,&nbsp;which&nbsp;puts&nbsp;its&nbsp;own&nbsp;bin&nbsp;folder&nbsp;at&nbsp;the<br>
+front&nbsp;of&nbsp;PATH.&nbsp;Passed&nbsp;on&nbsp;as-is,&nbsp;`python`&nbsp;inside&nbsp;`conda&nbsp;run&nbsp;-n&nbsp;habitat`<br>
+would&nbsp;find&nbsp;the&nbsp;venv's&nbsp;Python&nbsp;first:&nbsp;the&nbsp;wrong&nbsp;version,&nbsp;with&nbsp;no&nbsp;Habitat.<br>
+So&nbsp;the&nbsp;venv's&nbsp;folders&nbsp;are&nbsp;taken&nbsp;out&nbsp;of&nbsp;PATH,&nbsp;and&nbsp;conda's&nbsp;folder&nbsp;is&nbsp;added.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict[str,&nbsp;str]:&nbsp;a&nbsp;copy&nbsp;of&nbsp;the&nbsp;server's&nbsp;environment,&nbsp;adjusted.</span></dd></dl>
+ <dl><dt><a name="-start_simulation"><strong>start_simulation</strong></a>(
+    sim_id: str,
+    request: starlette.requests.Request,
+    where: str = 'browser'
+)</dt><dd><span class="code">POST&nbsp;/api/simulations/{sim_id}/start:&nbsp;starts&nbsp;a&nbsp;simulation&nbsp;for&nbsp;this&nbsp;session.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;sim_id&nbsp;(str):&nbsp;a&nbsp;key&nbsp;of&nbsp;SIMULATIONS.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;request:&nbsp;the&nbsp;caller's&nbsp;request&nbsp;(its&nbsp;session&nbsp;cookie).<br>
+&nbsp;&nbsp;&nbsp;&nbsp;where&nbsp;(str):&nbsp;"browser"&nbsp;opens&nbsp;the&nbsp;window&nbsp;on&nbsp;its&nbsp;own&nbsp;virtual&nbsp;screen,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;shown&nbsp;in&nbsp;the&nbsp;page;&nbsp;"server"&nbsp;opens&nbsp;it&nbsp;on&nbsp;the&nbsp;server's&nbsp;monitor.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Only&nbsp;matters&nbsp;for&nbsp;interactive&nbsp;simulations.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict:&nbsp;the&nbsp;new&nbsp;run's&nbsp;summary&nbsp;(see&nbsp;_summary).<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HTTPException:&nbsp;404&nbsp;unknown&nbsp;id,&nbsp;400&nbsp;bad&nbsp;`where`,&nbsp;409&nbsp;this&nbsp;session<br>
+&nbsp;&nbsp;&nbsp;&nbsp;already&nbsp;has&nbsp;a&nbsp;run,&nbsp;503&nbsp;all&nbsp;slots&nbsp;taken&nbsp;or&nbsp;something&nbsp;not&nbsp;installed,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;500&nbsp;the&nbsp;process&nbsp;could&nbsp;not&nbsp;be&nbsp;started.</span></dd></dl>
+ <dl><dt><a name="-stop_for_session"><strong>stop_for_session</strong></a>(token)</dt><dd><span class="code">Stops&nbsp;a&nbsp;session's&nbsp;run&nbsp;when&nbsp;it&nbsp;logs&nbsp;out&nbsp;or&nbsp;its&nbsp;login&nbsp;expires.<br>
+&nbsp;<br>
+Called&nbsp;by&nbsp;main.py.&nbsp;The&nbsp;run&nbsp;stays&nbsp;in&nbsp;_runs&nbsp;until&nbsp;it&nbsp;has&nbsp;really&nbsp;ended,&nbsp;so<br>
+its&nbsp;slot&nbsp;(ports,&nbsp;map&nbsp;folder,&nbsp;GPU&nbsp;share)&nbsp;is&nbsp;not&nbsp;handed&nbsp;out&nbsp;too&nbsp;early.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;token&nbsp;(str):&nbsp;the&nbsp;session&nbsp;token&nbsp;that&nbsp;was&nbsp;logged&nbsp;out.</span></dd></dl>
+ <dl><dt><a name="-stop_on_shutdown"><strong>stop_on_shutdown</strong></a>()</dt><dd><span class="code">Stops&nbsp;every&nbsp;run&nbsp;and&nbsp;its&nbsp;virtual&nbsp;screen&nbsp;when&nbsp;the&nbsp;server&nbsp;shuts&nbsp;down.<br>
+&nbsp;<br>
+Called&nbsp;by&nbsp;main.py&nbsp;when&nbsp;uvicorn&nbsp;stops&nbsp;(Ctrl+C,&nbsp;a&nbsp;--reload&nbsp;restart,&nbsp;the<br>
+terminal&nbsp;closing);&nbsp;registered&nbsp;with&nbsp;atexit&nbsp;as&nbsp;a&nbsp;backup&nbsp;for&nbsp;other&nbsp;exits.</span></dd></dl>
+ <dl><dt><a name="-stop_simulation"><strong>stop_simulation</strong></a>(request: starlette.requests.Request)</dt><dd><span class="code">POST&nbsp;/api/simulations/stop:&nbsp;stops&nbsp;this&nbsp;session's&nbsp;run.<br>
+&nbsp;<br>
+The&nbsp;stop&nbsp;happens&nbsp;in&nbsp;a&nbsp;background&nbsp;thread;&nbsp;the&nbsp;page&nbsp;sees&nbsp;"stopping",&nbsp;then<br>
+"stopped",&nbsp;by&nbsp;polling&nbsp;current_run.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;request:&nbsp;the&nbsp;caller's&nbsp;request&nbsp;(its&nbsp;session&nbsp;cookie).<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict:&nbsp;{"message":&nbsp;"Stopping"}&nbsp;(or&nbsp;"Already&nbsp;stopping").<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;HTTPException(409):&nbsp;nothing&nbsp;is&nbsp;running,&nbsp;or&nbsp;it&nbsp;is&nbsp;still&nbsp;starting.</span></dd></dl>
+ <dl><dt><a name="-twin_python_command"><strong>twin_python_command</strong></a>()</dt><dd><span class="code">The&nbsp;command&nbsp;that&nbsp;starts&nbsp;the&nbsp;physics&nbsp;twin's&nbsp;Python.<br>
+&nbsp;<br>
+The&nbsp;twin&nbsp;needs&nbsp;Python&nbsp;3.10+&nbsp;and&nbsp;MuJoCo,&nbsp;which&nbsp;neither&nbsp;the&nbsp;app's&nbsp;venv&nbsp;nor<br>
+the&nbsp;habitat&nbsp;env&nbsp;(3.9)&nbsp;has.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;list[str]&nbsp;|&nbsp;None:&nbsp;DELTA_TWIN_PYTHON&nbsp;if&nbsp;set,&nbsp;else&nbsp;physical-drone/venv,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;else&nbsp;the&nbsp;conda&nbsp;env&nbsp;`twin`,&nbsp;or&nbsp;None&nbsp;if&nbsp;none&nbsp;of&nbsp;them&nbsp;exists.</span></dd></dl>
+</td></tr></table><p>
+<table class="section">
+<tr class="decor data-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Data</strong></td></tr>
+    
+<tr><td class="decor data-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><strong>FIRST_BRAIN_PORT</strong> = 47600<br>
+<strong>MAX_LINES</strong> = 2000<br>
+<strong>PROJECT_CONFIG</strong> = PosixPath('simulation/config/project.json')<br>
+<strong>REPOSITORY</strong> = PosixPath('COMP-490-Group-Project')<br>
+<strong>SESSION_COOKIE</strong> = 'delta_session'<br>
+<strong>SIMULATIONS</strong> = {'brain-checks': {'description': "The brain's 21 checks: that it cannot cheat (no ...measure), and its map, rooms, replica and height.", 'interactive': False, 'kind': 'habitat', 'script': 'tests/test_brain.py', 'title': 'Brain checks'}, 'check-setup': {'description': 'Checks the conda env, Habitat versions and HSSD data are in place.', 'interactive': False, 'kind': 'habitat', 'script': 'config/check_setup.py', 'title': 'Check setup'}, 'delta': {'command': ['bash', 'run_drone.sh', '--run', '{run}', '--port', '{brain_port}', '--fresh', '--depth', 'oracle'], 'description': "The drone and its brain: it finds where it is (R...sted is the brain's own localization and mapping.", 'interactive': True, 'kind': 'command', 'needs_conda': True, 'stop_seconds': 45, 'title': 'DELTA (interactive)'}, 'drone-tests': {'description': 'Rolls, flies, crashes and lands the drone with no window, and checks each one worked.', 'interactive': False, 'kind': 'habitat', 'script': 'tests/test_drone.py', 'title': 'Drone tests'}, 'open-environment': {'description': '(new): DELTA as it is now -- the drone and its b...no brain. Click the window before using the keys.', 'interactive': True, 'kind': 'habitat', 'newer': 'delta', 'script': 'demo/open_environment.py', 'title': 'Drive the drone (interactive)'}, 'twin-flight': {'args': ['-m', 'twin.fly', 'twin/flights/hover.json', '--out', '{out}'], 'description': "The real drone's hardware in MuJoCo, flying twin...d a plot of the flight. No Habitat or GPU needed.", 'interactive': False, 'kind': 'twin', 'results': True, 'title': 'Physics twin: scripted flight'}, 'twin-play': {'args': ['-m', 'twin.play'], 'description': 'The same drone in a room with a table, a sofa an... L lands. Click the window before using the keys.', 'interactive': True, 'kind': 'twin', 'title': 'Physics twin: fly it yourself (interactive)'}}<br>
+<strong>SIMULATION_DIR</strong> = PosixPath('simulation')<br>
+<strong>TWIN_DIR</strong> = PosixPath('physical-drone')<br>
+<strong>router</strong> = &lt;fastapi.routing.APIRouter object&gt;</td></tr></table>
+</body></html>
