@@ -1,30 +1,73 @@
-"""An invisible screen on the server that the browser can look at.
+"""Virtual Screen: an invisible screen on the server that a browser can watch and control.
 
-When "Open environment" runs in the browser, its window must not open on the
-server's own monitor. So we start a screen that only exists in memory, open
-the window there, and let the browser watch and control it:
+Module      : virtual_screen.py   (Design: Virtual Screen)
+Class       : VirtualScreen
+Date        : Created 2026-10-21, last updated 2026-10-26
+Programmer  : Sebastian
 
-    Xvfb        the invisible screen (a display like :99, the size of the window)
-    x11vnc      shares that screen over VNC, on this machine only
-    websockify  serves noVNC, the in-browser VNC viewer, and carries the VNC
-                traffic over a WebSocket. This is the port the browser uses.
+DESCRIPTION
+    When a simulation runs "in the browser", its window must not open on the
+    server's own monitor. Instead it opens on a screen that only exists in
+    memory, and the browser watches and controls it:
 
-The simulation still renders with the GPU (Habitat uses EGL, not the
-screen); the screen only receives the finished pictures, which is cheap.
+        Xvfb        the invisible screen (a display such as :99)
+        x11vnc      shares that screen over VNC, on this machine only
+        websockify  serves noVNC, the in-browser VNC viewer, and carries the
+                    VNC traffic over a WebSocket; this is the browser's port
 
-Each run gets its own screen, its own VNC password and its own viewer port,
-so several people can each have their own window at the same time. The
-viewer ports are DELTA_VIEWER_PORT and the ones right after it (6080, 6081,
-6082, ... one per simulation that can run at once).
+    The simulation still renders with the GPU; the screen only receives the
+    finished pictures. Each run gets its own screen, VNC password and viewer
+    port, so several people can each have their own window at once.
 
-Needs, on the server:
+    Needs on the server: sudo apt install xvfb x11vnc novnc websockify
 
-    sudo apt install xvfb x11vnc novnc websockify
+IMPORTANT FUNCTIONS
+    VirtualScreen(port)
+        In : the viewer port the browser will connect to (6080, 6081, ...).
+        Out: a screen object, not started yet; .password is set.
+    VirtualScreen.start() -> None
+        Starts Xvfb, x11vnc and websockify. Raises RuntimeError (with the
+        reason) if a program is missing, the port is taken or one fails.
+    VirtualScreen.environment(env) -> dict
+        In : environment variables. Out: a copy that opens windows on this
+        screen (DISPLAY, SDL_VIDEODRIVER=x11, Wayland variables removed).
+    VirtualScreen.stop() -> None
+        Stops the three programs and deletes the screen's temporary files.
+    missing_requirements() -> list[str]
+        Out: names of the programs not installed; empty means ready.
 
-Settings (environment variables, all optional):
+IMPORTANT DATA STRUCTURES
+    VirtualScreen.processes : list[subprocess.Popen]
+        The helper programs, in the order they were started.
+    VirtualScreen.log_dir : Path
+        A temporary folder with each helper's log, the VNC password file
+        (deleted by x11vnc once read) and the file x11vnc writes its port to.
 
-    DELTA_VIEWER_PORT   first port the browser connects to   (default 6080)
-    DELTA_NOVNC_DIR     where noVNC's files are        (default /usr/share/novnc)
+ALGORITHMS
+    Display number: linear search from :99 upward for the first number with
+    no X lock file or socket, done under a lock so two screens starting at
+    the same moment cannot take the same one.
+
+    VNC port: x11vnc picks a free port itself (-autoport) and reports it
+    through a file (-flag), which is then read back. Chosen over finding a
+    free port first and handing it to x11vnc, because another program could
+    take that port in between.
+
+    Access control: an 8-character random password per screen (secrets
+    module; VNC uses at most 8 characters), given only to the session that
+    started the run, so nobody can open another person's window.
+
+    Shutdown in reverse start order (viewer, VNC, screen), so nothing is left
+    attached to a screen that is already gone.
+
+    Why this approach: Xvfb + x11vnc + noVNC lets an unchanged desktop
+    program appear in any browser with nothing to install on the client.
+    Remote-desktop software would need an install on every client, and
+    rewriting the simulation to draw in the browser would mean a new renderer.
+
+SETTINGS (environment variables, all optional)
+    DELTA_VIEWER_PORT   first viewer port   (default 6080)
+    DELTA_NOVNC_DIR     where noVNC's files are   (default /usr/share/novnc)
 """
 
 import os
@@ -47,6 +90,7 @@ INSTALL_HINT = "On the server run: sudo apt install xvfb x11vnc novnc websockify
 
 
 def first_viewer_port():
+    """The viewer port of slot 1 (DELTA_VIEWER_PORT, default 6080); slot n uses this + n - 1."""
     return int(os.environ.get("DELTA_VIEWER_PORT", "6080"))
 
 
@@ -56,11 +100,17 @@ _start_lock = threading.Lock()
 
 
 def novnc_dir():
+    """The folder holding noVNC's web files (DELTA_NOVNC_DIR, default /usr/share/novnc)."""
     return Path(os.environ.get("DELTA_NOVNC_DIR", "/usr/share/novnc"))
 
 
 def missing_requirements():
-    """What is not installed, as a list of names. Empty means ready."""
+    """What the in-browser view needs but is not installed.
+
+    Returns:
+        list[str]: missing program names ("Xvfb", "x11vnc", "websockify",
+        "novnc"); empty means ready.
+    """
     missing = [name for name in REQUIRED_PROGRAMS if shutil.which(name) is None]
     if not (novnc_dir() / "vnc.html").is_file():
         missing.append("novnc")
@@ -68,7 +118,17 @@ def missing_requirements():
 
 
 def _free_display():
-    # :99 and up are rarely used by real screens. A lock file means taken.
+    """The first free X display number from 99 to 139.
+
+    :99 and up are rarely used by real screens; a lock file or socket means
+    the number is taken.
+
+    Returns:
+        int: the display number.
+
+    Raises:
+        RuntimeError: all of them are taken.
+    """
     for number in range(99, 140):
         if not Path(f"/tmp/.X{number}-lock").exists() and \
            not Path(f"/tmp/.X11-unix/X{number}").exists():
@@ -77,12 +137,21 @@ def _free_display():
 
 
 def _port_in_use(port):
+    """True if something on this machine is listening on the TCP port."""
     with socket.socket() as s:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def _read_port(path):
-    # x11vnc -flag writes "PORT=5901" to the file once it is listening
+    """The VNC port x11vnc reported, or None if it has not written it yet.
+
+    Args:
+        path (Path): the file given to x11vnc -flag; it holds "PORT=5901"
+            once x11vnc is listening.
+
+    Returns:
+        int | None: the port.
+    """
     try:
         text = path.read_text().strip()
     except OSError:
@@ -93,6 +162,16 @@ def _read_port(path):
 
 
 def _wait_for(check, seconds, what):
+    """Polls check() every 0.1 s until it returns True.
+
+    Args:
+        check (callable): returns True once the thing is ready.
+        seconds (float): how long to wait.
+        what (str): the name used in the error message.
+
+    Raises:
+        RuntimeError: check() was still False after `seconds`.
+    """
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if check():
@@ -102,7 +181,22 @@ def _wait_for(check, seconds, what):
 
 
 class VirtualScreen:
+    """One invisible screen, shared with one browser through its own port.
+
+    Attributes:
+        port (int): the viewer port the browser connects to.
+        password (str): random 8-character VNC password for this screen.
+        display (str | None): the X display, e.g. ":99", once started.
+        processes (list[subprocess.Popen]): the helpers, in start order.
+        log_dir (Path): temporary folder for the helpers' logs and files.
+    """
+
     def __init__(self, port):
+        """Prepares a screen for the given viewer port; start() starts it.
+
+        Args:
+            port (int): the viewer port the browser will connect to.
+        """
         self.port = port      # the viewer port the browser connects to
         self.display = None
         self.processes = []
@@ -114,7 +208,13 @@ class VirtualScreen:
         self.log_dir = Path(tempfile.mkdtemp(prefix="delta-screen-"))
 
     def start(self):
-        """Start all three programs. Raises RuntimeError if any fails."""
+        """Starts Xvfb, x11vnc and websockify, in that order.
+
+        Raises:
+            RuntimeError: a program is missing, the viewer port is in use, or
+            a program failed to start (the message includes its last output).
+            Whatever had already started is stopped first.
+        """
         missing = missing_requirements()
         if missing:
             raise RuntimeError(f"Missing {', '.join(missing)}. {INSTALL_HINT}")
@@ -161,9 +261,14 @@ class VirtualScreen:
             raise
 
     def _helper_environment(self):
-        # The server is usually logged in to a Wayland desktop (Ubuntu's
-        # default). x11vnc sees WAYLAND_DISPLAY and refuses to start, even
-        # though the screen it is given is an X screen. So hide it.
+        """Environment for the helper programs, pointed at this screen.
+
+        Ubuntu's desktop is usually Wayland, and x11vnc refuses to start when
+        it sees WAYLAND_DISPLAY, even for an X screen, so that is removed.
+
+        Returns:
+            dict[str, str]: a copy of the server's environment, adjusted.
+        """
         env = dict(os.environ)
         env.pop("WAYLAND_DISPLAY", None)
         env.pop("XAUTHORITY", None)
@@ -173,6 +278,15 @@ class VirtualScreen:
         return env
 
     def _launch(self, command):
+        """Starts one helper program, logging its output to log_dir.
+
+        Args:
+            command (list[str]): the program and its arguments.
+
+        Raises:
+            RuntimeError: it exited within 0.3 s (bad option, missing library);
+            the message includes its last output.
+        """
         log_path = self.log_dir / f"{command[0]}.log"
         with log_path.open("w") as log:
             process = subprocess.Popen(
@@ -193,6 +307,7 @@ class VirtualScreen:
 
     @staticmethod
     def _last_lines(log_path, count=3):
+        """The last `count` non-empty lines of a log, joined with " | "."""
         try:
             lines = [l.strip() for l in log_path.read_text(errors="replace").splitlines() if l.strip()]
         except OSError:
@@ -200,7 +315,15 @@ class VirtualScreen:
         return " | ".join(lines[-count:]) or "no output"
 
     def environment(self, env):
-        """Changes env so a window opens on this screen instead of the monitor."""
+        """Environment for the simulation, so its window opens on this screen.
+
+        Args:
+            env (dict[str, str]): the simulation's environment variables.
+
+        Returns:
+            dict[str, str]: a copy with DISPLAY set to this screen,
+            SDL_VIDEODRIVER=x11 for pygame, and the Wayland variables removed.
+        """
         env = dict(env)
         env["DISPLAY"] = self.display
         env["SDL_VIDEODRIVER"] = "x11"     # pygame: use the X screen, not Wayland
@@ -210,7 +333,10 @@ class VirtualScreen:
         return env
 
     def stop(self):
-        # Last started, first stopped: the viewer, then VNC, then the screen
+        """Stops the helpers in reverse start order and deletes log_dir.
+
+        Each gets SIGTERM and 3 seconds, then SIGKILL. Safe to call twice.
+        """
         for process in reversed(self.processes):
             if process.poll() is None:
                 try:

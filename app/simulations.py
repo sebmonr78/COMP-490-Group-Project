@@ -1,39 +1,100 @@
-"""Running the simulations from the web page.
+"""Simulation Manager: starts, tracks and stops the simulations for the web dashboard.
 
-The web app and the simulations live in different Pythons: the app runs in
-its own venv, Habitat only exists inside the `habitat` conda env (see
-simulation/README.md), and the physics twin needs Python 3.10+ with MuJoCo
-(physical-drone/README.md). So the app imports none of them. It starts each
-one as a separate process, the same way you would from a terminal:
+Module      : simulations.py   (Design: Simulation Manager)
+Date        : Created 2026-10-21, last updated 2026-11-02
+Programmer  : Sebastian
 
-    conda run -n habitat python demo/open_environment.py      (simulation/)
-    bash run_drone.sh --run web-1 --port 47600 ...            (simulation/)
-    venv/bin/python -m twin.fly twin/flights/hover.json ...   (physical-drone/)
+DESCRIPTION
+    The web app and the simulations need different Pythons: the app runs in
+    its own venv, Habitat exists only in the `habitat` conda env, and the
+    physics twin needs Python 3.10+ with MuJoCo. So this module imports none
+    of them. It starts each simulation as a separate process, the same way it
+    would be started from a terminal, keeps its output for the page, and
+    serves the endpoints under /api/simulations.
 
-and keeps their output so the page can show it.
+    Only the simulations listed in SIMULATIONS can be started. The page sends
+    an id, never a path or a command, so nothing else can be run through it.
 
-Only the simulations listed in SIMULATIONS can be started. The page sends an
-id, never a path or a command, so nobody can use this to run anything else.
+    Each login session (one account on one device) gets its own run. A
+    session runs one simulation at a time, and the server runs at most
+    DELTA_MAX_SIMULATIONS (default 3) across everyone, because the Habitat
+    simulations share one GPU.
 
-More than one at a time
------------------------
-Each login session gets its own run. The same account logged in on two
-devices counts as two sessions, so it gets two runs. A session has one run at
-a time, and the whole server at most DELTA_MAX_SIMULATIONS (3), because the
-Habitat ones all load the house onto the same GPU.
+IMPORTANT FUNCTIONS
+    start_simulation(sim_id, request, where="browser") -> dict
+        POST /api/simulations/{sim_id}/start.
+        In : simulation id, the caller's session cookie, and where its
+             window opens ("browser" or "server").
+        Out: summary of the new run (see _summary).
+        Errors: 404 unknown id, 409 already running, 503 server full or
+        something not installed.
 
-Every run takes a numbered *slot* (1, 2, 3) for as long as it runs, and
-everything that two runs must not share comes from its slot number:
+    stop_simulation(request) -> dict
+        POST /api/simulations/stop.
+        In : the caller's session cookie.
+        Out: {"message": "Stopping"}; the run stops in the background.
 
-    viewer port      DELTA_VIEWER_PORT + slot - 1      6080, 6081, 6082
-    DELTA's brain    port 47600 + slot - 1, map folder simulation/outputs/runs/web-<slot>/
-    physics twin     results in physical-drone/outputs/web-<slot>/
+    current_run(request, since=0) -> dict
+        GET /api/simulations/run, polled by the page once a second.
+        In : session cookie; how many output lines the page already has.
+        Out: {"run": summary with only the newer lines, or None}.
 
-Settings (environment variables, all optional):
+    list_simulations(request) -> list[dict]
+        GET /api/simulations.
+        Out: one entry per simulation: id, title, description, whether it is
+             running, and whether the in-browser view is available.
 
-    DELTA_CONDA_ENV         conda env for the Habitat scripts (default: the one project.json asks for)
-    DELTA_SIM_PYTHON        a python to use instead of conda run, e.g.
-                            ~/miniconda3/envs/habitat/bin/python
+    stop_for_session(token) -> None
+        Called by main.py on logout or login expiry: stops that session's run.
+
+    stop_on_shutdown() -> None
+        Called when uvicorn shuts down: stops every run and its screen.
+
+IMPORTANT DATA STRUCTURES
+    SIMULATIONS : dict[str, dict]
+        The catalogue of what can run: id -> kind ("habitat", "command" or
+        "twin"), title, what to run, and options (interactive, stop_seconds,
+        results).
+
+    _runs : dict[str, dict]
+        Session token -> that session's current or last run. A run holds the
+        process, its status ("starting", "running", "stopping", "stopped",
+        "finished" or "failed"), output, slot, virtual screen and viewer.
+        Guarded by _lock, since output-reader threads and requests share it.
+
+    run["lines"] : collections.deque(maxlen=MAX_LINES)
+        The last 2000 lines of output; run["line_count"] counts all of them.
+
+ALGORITHMS
+    Slot allocation (first fit)
+        Each run takes the lowest free slot number (1..DELTA_MAX_SIMULATIONS).
+        Everything two runs must not share comes from it: viewer port
+        6080 + slot - 1, DELTA's brain port 47600 + slot - 1, and the
+        web-<slot> map and results folders. Chosen over asking the OS for
+        random free ports because the ports stay predictable (a firewall
+        rule can list them) and are reused, and the fixed pool doubles as
+        the GPU limit.
+
+    Output ring buffer with a cursor
+        Output goes into a bounded deque, plus a total line count. The page
+        asks for lines "since" the count it already has, so each poll only
+        downloads new lines and memory stays fixed however long a run lasts.
+        Chosen over WebSocket streaming because once-a-second HTTP polling is
+        simpler and works on any network the page itself works on.
+
+    Two-phase start
+        A slot is claimed while holding the lock; the slow work (virtual
+        screen, process start) happens after it is released, so other users'
+        polling is never blocked while a run starts.
+
+    Graceful stop
+        SIGTERM to the run's whole process group, wait up to the
+        simulation's stop_seconds, then SIGKILL. The group also catches what
+        `conda run` started; the wait lets DELTA save its map first.
+
+SETTINGS (environment variables, all optional)
+    DELTA_CONDA_ENV         conda env for the Habitat scripts (default: from project.json)
+    DELTA_SIM_PYTHON        a Python to use instead of `conda run`
     DELTA_MAX_SIMULATIONS   how many can run at once, across everyone (default 3)
     DELTA_TWIN_PYTHON       the physics twin's Python (default: physical-drone/venv,
                             else the conda env `twin`)
@@ -168,6 +229,11 @@ _run_count = 0  # numbers each run, so the page can tell runs apart
 
 
 def max_running():
+    """How many simulations may run at once on the whole server.
+
+    Returns:
+        int: DELTA_MAX_SIMULATIONS, at least 1; 3 if it is unset or not a number.
+    """
     try:
         return max(1, int(os.environ.get("DELTA_MAX_SIMULATIONS", "3")))
     except ValueError:
@@ -175,6 +241,17 @@ def max_running():
 
 
 def _owner(request: Request):
+    """The login session a request belongs to.
+
+    Args:
+        request: the incoming request; its session cookie identifies the session.
+
+    Returns:
+        str: the session token, used as the key in _runs.
+
+    Raises:
+        HTTPException(401): the request has no session cookie.
+    """
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         raise HTTPException(status_code=401, detail="Log in first")
@@ -182,6 +259,7 @@ def _owner(request: Request):
 
 
 def _now():
+    """The current UTC time as "YYYY-MM-DD HH:MM:SS"."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -190,6 +268,12 @@ def _now():
 # ---------------------------------------------------------------------------
 
 def conda_env_name():
+    """The conda env the Habitat scripts run in.
+
+    Returns:
+        str: DELTA_CONDA_ENV if set, else the env simulation/config/project.json
+        names, else "habitat".
+    """
     if os.environ.get("DELTA_CONDA_ENV"):
         return os.environ["DELTA_CONDA_ENV"]
     try:
@@ -200,12 +284,21 @@ def conda_env_name():
 
 
 def conda_executable():
-    # conda sets CONDA_EXE when it is initialised in your shell.
+    """Path to the conda program, or None if conda cannot be found.
+
+    conda sets CONDA_EXE when it is initialised in the shell; otherwise PATH
+    is searched.
+    """
     return os.environ.get("CONDA_EXE") or shutil.which("conda")
 
 
 def python_command():
-    """The command that starts Python inside the Habitat env, or None."""
+    """The command that starts Python inside the Habitat env.
+
+    Returns:
+        list[str] | None: DELTA_SIM_PYTHON if set, else `conda run` in the
+        Habitat env, or None when neither is available.
+    """
     custom = os.environ.get("DELTA_SIM_PYTHON")
     if custom:
         return [os.path.expanduser(custom), "-u"]
@@ -221,11 +314,14 @@ def python_command():
 
 
 def twin_python_command():
-    """The command that starts the physics twin's Python, or None.
+    """The command that starts the physics twin's Python.
 
-    It needs Python 3.10+ and MuJoCo, which neither the app's venv nor the
-    habitat env (3.9) has. physical-drone/README.md makes a venv there; a
-    conda env called `twin` works too.
+    The twin needs Python 3.10+ and MuJoCo, which neither the app's venv nor
+    the habitat env (3.9) has.
+
+    Returns:
+        list[str] | None: DELTA_TWIN_PYTHON if set, else physical-drone/venv,
+        else the conda env `twin`, or None if none of them exists.
     """
     custom = os.environ.get("DELTA_TWIN_PYTHON")
     if custom:
@@ -247,12 +343,15 @@ def twin_python_command():
 
 
 def simulation_environment():
-    """The environment variables the simulation runs with.
+    """The environment variables a simulation runs with.
 
-    uvicorn runs inside the app's venv, and an activated venv puts its own
-    bin folder at the front of PATH. Passed on as-is, `python` inside
-    `conda run -n habitat` would still find the venv's Python first -- the
-    wrong version, with no Habitat in it. So the venv is taken back out.
+    uvicorn runs inside the app's venv, which puts its own bin folder at the
+    front of PATH. Passed on as-is, `python` inside `conda run -n habitat`
+    would find the venv's Python first: the wrong version, with no Habitat.
+    So the venv's folders are taken out of PATH, and conda's folder is added.
+
+    Returns:
+        dict[str, str]: a copy of the server's environment, adjusted.
     """
     env = dict(os.environ, PYTHONUNBUFFERED="1")
 
@@ -281,7 +380,15 @@ def simulation_environment():
 
 
 def _slot_values(slot):
-    """Everything a run must not share with another, from its slot (1, 2, 3...)."""
+    """Everything a run must not share with another, derived from its slot.
+
+    Args:
+        slot (int): the run's slot number, 1..max_running().
+
+    Returns:
+        dict[str, str]: "slot", "run" (web-<slot>), "brain_port" (47600 + slot - 1)
+        and "out" (the physics twin's results folder).
+    """
     return {
         "slot": str(slot),
         "run": f"web-{slot}",
@@ -291,16 +398,32 @@ def _slot_values(slot):
 
 
 def _fill(part, values):
-    """"--run {run}" -> "--run web-2". Only these names, nothing else in braces."""
+    """Fills the {name} placeholders in one command-line argument.
+
+    Args:
+        part (str): one argument, e.g. "--run {run}".
+        values (dict[str, str]): from _slot_values.
+
+    Returns:
+        str: e.g. "--run web-2". Only the names in values are replaced.
+    """
     for name, value in values.items():
         part = part.replace("{" + name + "}", value)
     return part
 
 
 def _command_for(sim_id, slot):
-    """(argv, folder to run it in) for this simulation in this slot.
+    """The command line and working folder for a simulation in a slot.
 
-    Raises HTTPException(503) when what it needs is not installed.
+    Args:
+        sim_id (str): a key of SIMULATIONS.
+        slot (int): the run's slot number.
+
+    Returns:
+        tuple[list[str], Path]: the command to run, and the folder to run it in.
+
+    Raises:
+        HTTPException(503): the Python or conda it needs is not installed.
     """
     simulation = SIMULATIONS[sim_id]
     values = _slot_values(slot)
@@ -345,7 +468,15 @@ def _command_for(sim_id, slot):
 # ---------------------------------------------------------------------------
 
 def _read_output(run):
-    """Runs in a background thread: copies the process output into the log."""
+    """Copies a run's output into its log until the process ends.
+
+    Runs in a background thread, one per run. When the process exits it
+    stops the run's virtual screen, records the exit code and final status,
+    and removes the run if its owner has logged out meanwhile.
+
+    Args:
+        run (dict): the run, as stored in _runs.
+    """
     for line in run["process"].stdout:
         with _lock:
             run["lines"].append(line.rstrip("\n"))
@@ -375,9 +506,17 @@ def _read_output(run):
 
 
 def _read_results(run):
-    """For the physics twin's scripted flight: the numbers worth showing.
+    """The physics twin's flight results, for the page to show.
 
-    twin.fly writes report.json and flight.png to the run's folder.
+    twin.fly writes report.json and flight.png to the run's results folder.
+
+    Args:
+        run (dict): a finished run.
+
+    Returns:
+        dict | None: {"summary": [[label, value], ...], "steps": [...],
+        "picture": bool}, or None if the simulation has no results or the
+        report cannot be read.
     """
     if not SIMULATIONS[run["id"]].get("results"):
         return None
@@ -407,14 +546,28 @@ def _read_results(run):
 
 
 def _is_running(run):
+    """True if the run exists and has not ended yet (starting, running or stopping)."""
     return run is not None and run["status"] in ("starting", "running", "stopping")
 
 
 def _running_count():
+    """How many runs are in progress across all sessions. Call with _lock held."""
     return sum(1 for run in _runs.values() if _is_running(run))
 
 
 def _summary(run, since=0):
+    """What the page is told about a run. Call with _lock held.
+
+    Args:
+        run (dict | None): the run, as stored in _runs.
+        since (int): how many output lines the page already has.
+
+    Returns:
+        dict | None: the run's number, id, title, status, exit code, times,
+        output lines after `since`, slot, viewer (port and password, while it
+        runs in the browser), results, and how many slots are in use; None
+        if there is no run.
+    """
     if run is None:
         return None
     lines = list(run["lines"])
@@ -448,6 +601,15 @@ def _summary(run, since=0):
 
 @router.get("")
 def list_simulations(request: Request):
+    """GET /api/simulations: what the page can run.
+
+    Args:
+        request: the caller's request (its session cookie).
+
+    Returns:
+        list[dict]: per simulation: id, title, description, interactive,
+        running (for this session), newer, browser_ready, browser_missing.
+    """
     owner = _owner(request)
     with _lock:
         mine = _runs.get(owner)
@@ -466,8 +628,18 @@ def list_simulations(request: Request):
 
 @router.get("/run")
 def current_run(request: Request, since: int = 0):
-    # The page polls this. `since` = how many lines it already has, so it
-    # only gets the new ones. Each session only ever sees its own run.
+    """GET /api/simulations/run: this session's current or last run.
+
+    The page polls this once a second. Each session only sees its own run.
+
+    Args:
+        request: the caller's request (its session cookie).
+        since (int): how many output lines the page already has, so only
+            newer ones are sent.
+
+    Returns:
+        dict: {"run": summary (see _summary) or None}.
+    """
     owner = _owner(request)
     with _lock:
         return {"run": _summary(_runs.get(owner), since)}
@@ -475,7 +647,18 @@ def current_run(request: Request, since: int = 0):
 
 @router.get("/run/picture")
 def run_picture(request: Request, number: int):
-    # The physics twin's flight plot, for this session's own run only
+    """GET /api/simulations/run/picture: the physics twin's flight plot.
+
+    Args:
+        request: the caller's request (its session cookie).
+        number (int): the run number the page is showing.
+
+    Returns:
+        FileResponse: flight.png of this session's own run.
+
+    Raises:
+        HTTPException(404): no such run for this session, or it has no plot.
+    """
     owner = _owner(request)
     with _lock:
         run = _runs.get(owner)
@@ -490,9 +673,23 @@ def run_picture(request: Request, number: int):
 
 @router.post("/{sim_id}/start")
 def start_simulation(sim_id: str, request: Request, where: str = "browser"):
-    # where: "browser" = window on its own invisible screen, shown on the page
-    #        "server"  = window on the server's own monitor
-    # Only matters for interactive simulations; the others have no window.
+    """POST /api/simulations/{sim_id}/start: starts a simulation for this session.
+
+    Args:
+        sim_id (str): a key of SIMULATIONS.
+        request: the caller's request (its session cookie).
+        where (str): "browser" opens the window on its own virtual screen,
+            shown in the page; "server" opens it on the server's monitor.
+            Only matters for interactive simulations.
+
+    Returns:
+        dict: the new run's summary (see _summary).
+
+    Raises:
+        HTTPException: 404 unknown id, 400 bad `where`, 409 this session
+        already has a run, 503 all slots taken or something not installed,
+        500 the process could not be started.
+    """
     global _run_count
     owner = _owner(request)
 
@@ -546,6 +743,7 @@ def start_simulation(sim_id: str, request: Request, where: str = "browser"):
         _runs[owner] = run
 
     def give_up(status_code, detail):
+        """Releases the claimed slot and reports the error to the page."""
         with _lock:
             if _runs.get(owner) is run:
                 del _runs[owner]
@@ -604,6 +802,20 @@ def start_simulation(sim_id: str, request: Request, where: str = "browser"):
 
 @router.post("/stop")
 def stop_simulation(request: Request):
+    """POST /api/simulations/stop: stops this session's run.
+
+    The stop happens in a background thread; the page sees "stopping", then
+    "stopped", by polling current_run.
+
+    Args:
+        request: the caller's request (its session cookie).
+
+    Returns:
+        dict: {"message": "Stopping"} (or "Already stopping").
+
+    Raises:
+        HTTPException(409): nothing is running, or it is still starting.
+    """
     owner = _owner(request)
     with _lock:
         run = _runs.get(owner)
@@ -621,6 +833,11 @@ def stop_simulation(request: Request):
 
 
 def _stop_run(run):
+    """Ends a run: SIGTERM, wait up to its stop_seconds (default 5), then SIGKILL.
+
+    Args:
+        run (dict): the run, with its process started.
+    """
     process = run["process"]
     _kill(process, signal.SIGTERM)
     try:
@@ -630,8 +847,14 @@ def _stop_run(run):
 
 
 def stop_for_session(token):
-    """main.py calls this when someone logs out or their login runs out:
-    their simulation stops, and its output is forgotten once it has."""
+    """Stops a session's run when it logs out or its login expires.
+
+    Called by main.py. The run stays in _runs until it has really ended, so
+    its slot (ports, map folder, GPU share) is not handed out too early.
+
+    Args:
+        token (str): the session token that was logged out.
+    """
     with _lock:
         run = _runs.get(token)
         if run is None:
@@ -651,6 +874,12 @@ def stop_for_session(token):
 
 
 def _kill(process, sig):
+    """Sends a signal to a run's whole process group (terminate() on Windows).
+
+    Args:
+        process (subprocess.Popen): the run's process.
+        sig (int): the signal, e.g. signal.SIGTERM.
+    """
     try:
         if os.name == "posix":
             os.killpg(process.pid, sig)
@@ -670,9 +899,11 @@ if os.name == "posix" and threading.current_thread() is threading.main_thread() 
 
 @atexit.register
 def stop_on_shutdown():
-    # main.py calls this when uvicorn shuts down (Ctrl+C, a --reload restart,
-    # the terminal closing), so no simulation window is left running with
-    # nothing attached to it. atexit is a backup for other ways Python exits.
+    """Stops every run and its virtual screen when the server shuts down.
+
+    Called by main.py when uvicorn stops (Ctrl+C, a --reload restart, the
+    terminal closing); registered with atexit as a backup for other exits.
+    """
     with _lock:
         runs = list(_runs.values())
     for run in runs:

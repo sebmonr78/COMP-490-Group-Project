@@ -1,30 +1,70 @@
 #!/usr/bin/env bash
-# Checks that everything the brain needs is installed, and installs whatever
-# is missing or the wrong version. Safe to run as often as you like: what is
-# already right is left alone.
+# =============================================================================
+# Brain Dependency Check
 #
-#     bash setup/check_brain.sh            check, then install what's missing
-#     bash setup/check_brain.sh --check    only check and report, install nothing
+# Script      : setup/check_brain.sh   (Design: Brain setup)
+# Date        : Created 2026-10-28
+# Programmer  : Sebastian
 #
-# What it checks, in order:
+# DESCRIPTION
+#   Checks that everything DELTA's brain needs is installed, and installs
+#   whatever is missing or the wrong version. Safe to run as often as
+#   needed: what is already right is left alone. setup_brain.sh builds the
+#   env from nothing and stops if it already exists; this script is for an
+#   env that exists but may be incomplete or out of date.
 #
-#     1. conda                         can't be installed from here: says how
-#     2. the `brain` conda env         Python 3.10, made if it doesn't exist
-#     3. its Python packages           the same pinned versions as setup_brain.sh
-#     4. that each one imports         a package can be installed and still broken
-#     5. the GPU                       torch must see CUDA (driver 570+); reported only
-#     6. the model files               DA3, YOLOE, the Piper voice
-#     7. RTAB-Map                      the `rtabmap` env and the compiled bridge,
-#                                      built by setup/setup_rtabmap.sh if missing
+#   Usage (from simulation/):
+#       bash setup/check_brain.sh            check, then install what's missing
+#       bash setup/check_brain.sh --check    only check and report
 #
-# setup_brain.sh builds the env from nothing and stops if it already exists.
-# This script is for an env that exists but may be incomplete or out of date.
-# The versions below must match setup_brain.sh; if you change one there,
-# change it here too.
+#   Checks, in order:
+#       1. conda                  cannot be installed from here: says how
+#       2. the `brain` conda env  Python 3.10, created if missing
+#       3. its Python packages    the pinned versions from setup_brain.sh
+#       4. that each one imports  a package can be installed and still broken
+#       5. the GPU                torch must see CUDA (driver 570+); reported only
+#       6. the model files        DA3, YOLOE, the Piper voice
+#       7. RTAB-Map               the `rtabmap` env and the compiled bridge,
+#                                 built by setup/setup_rtabmap.sh if missing
 #
-# No `set -e` on purpose: one thing failing must not stop the rest from being
-# checked. Every step reports what it found, and the summary at the end lists
-# everything that is still not right.
+#   Exit code: 0 if everything is in place, 1 if anything is still missing.
+#
+# IMPORTANT FUNCTIONS
+#   check_package NAME VERSION PIP_SPEC [needs-torch]
+#       In : pip package name, wanted version ("" = any), what to install,
+#            and whether it is built on torch.
+#       Out: prints ok / missing / wrong; installs PIP_SPEC if needed (not in
+#            --check mode); adds failures to PROBLEMS.
+#   installed_version NAME     Out: the installed version, or nothing.
+#   version_ok WANTED HAVE     True if HAVE matches WANTED, ignoring "+cu128".
+#   env_exists NAME            True if the conda env exists.
+#   brain_python / brain_pip   run Python / pip inside the `brain` env.
+#   bridge_works               True if the RTAB-Map bridge starts.
+#
+# IMPORTANT DATA STRUCTURES
+#   Pinned versions (TORCH, XFORMERS, DA3_COMMIT, ULTRALYTICS, PIPER, ...):
+#       must match setup_brain.sh; change both together.
+#   PROBLEMS  (array): everything still not right, printed in the summary.
+#   INSTALLED (array): everything this run installed or fixed.
+#   TORCH_OK  (0/1):   whether the pinned torch is in place.
+#
+# ALGORITHMS
+#   Check, then fix only what is wrong (idempotent): every item is compared
+#   with its pinned version first, so a second run changes nothing. Chosen
+#   over reinstalling everything, which would re-download several GB.
+#
+#   Dependency order: torch is checked and installed first, and packages
+#   built against it (xformers, ultralytics, DA3) wait until it is right.
+#   Otherwise pip would pull a different torch from the ordinary index to
+#   satisfy them (not the CUDA 12.8 build). Once torch is in, it is repeated
+#   in every install so pip cannot "upgrade" it.
+#
+#   Verify by import, not only by version: each module is imported in the
+#   env, since a package can be installed and still fail to load.
+#
+#   No `set -e` on purpose: one failure must not stop the rest from being
+#   checked; the summary lists everything still wrong.
+# =============================================================================
 
 set -uo pipefail
 

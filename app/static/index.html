@@ -271,15 +271,55 @@
       window.location.href = "/";
     });
 
-    // ---------- Simulations ----------
-    // The backend starts the simulation scripts inside the habitat conda env
-    // and keeps their output. This part shows that output and polls for more
-    // once a second while something is running.
+    /* ===========================================================================
+     * Simulations (dashboard section)
+     *
+     * Component   : Simulation panel   (Design: Simulation Manager, page side)
+     * Date        : Created 2026-10-21, last updated 2026-11-02
+     * Programmer  : Sebastian
+     *
+     * DESCRIPTION
+     *   Lists the simulations, starts and stops them, and shows the running
+     *   one: its live output, its window in the page (for "Run in browser"),
+     *   and the physics twin's results once its flight ends. The work itself
+     *   happens on the server (app/simulations.py).
+     *
+     * IMPORTANT FUNCTIONS
+     *   loadSimulations()          builds the table of simulations and buttons
+     *   startSimulation(id, where) asks the server to start one, then polls
+     *   stopSimulation()           asks the server to stop this session's run
+     *   pollRun()                  fetches new output once a second while running
+     *   showRun(run)               updates status, buttons, viewer, output
+     *   showViewer(run)            puts the run's window (noVNC) in the page
+     *   showResults(run)           shows the physics twin's numbers and plot
+     *
+     * IMPORTANT DATA STRUCTURES
+     *   run (from GET /api/simulations/run): number, title, status, lines,
+     *     line_count, viewer {port, password}, results, server_running/max
+     *   linesShown / shownRun / viewerShownFor / resultsShownFor: what is
+     *     already on screen, so each update only adds what is new
+     *
+     * ALGORITHMS
+     *   Incremental polling: every second while a run is active, the page
+     *   asks for output lines "since" the count it has, and appends only
+     *   those. A new run number means a new run, so the output is cleared.
+     *   Chosen over WebSockets because plain HTTP requests are simpler and
+     *   work wherever the page itself loads; polling stops when the run ends.
+     *
+     *   The window is an <iframe> of noVNC on the run's own viewer port, with
+     *   that run's password, so each session sees only its own window.
+     * ======================================================================== */
 
     let linesShown = 0;      // how many output lines are already on screen
     let shownRun = null;     // which run they belong to (its number)
     let pollTimer = null;
 
+    /**
+     * Builds the Simulations table from GET /api/simulations: one row per
+     * simulation, with Run buttons ("Run in browser" / "Run on server" for
+     * ones with a window; a "(new)" pair for one with a newer version).
+     * @returns {Promise<void>}
+     */
     async function loadSimulations() {
       const rows = document.getElementById("sim-rows");
       const message = document.getElementById("sim-message");
@@ -350,6 +390,13 @@
       }
     }
 
+    /**
+     * Starts a simulation for this session, then starts polling its output.
+     * Shows the server's reason if it refuses (already running, server full).
+     * @param {string} id     the simulation's id
+     * @param {string} where  "browser" (window in the page) or "server"
+     * @returns {Promise<void>}
+     */
     async function startSimulation(id, where) {
       const message = document.getElementById("sim-message");
       message.textContent = "";
@@ -375,6 +422,7 @@
       }
     }
 
+    /** Re-enables the Run buttons; "Run in browser" stays off if the server can't do it. */
     function unlockButtons() {
       document.querySelectorAll(".sim-start").forEach(button => {
         button.disabled = button.dataset.where === "browser" && button.dataset.browserReady !== "true";
@@ -385,6 +433,11 @@
     // the same server this page came from
     let viewerShownFor = null;
 
+    /**
+     * Shows the run's window in the page (noVNC on the run's viewer port, with
+     * its password), or hides it once the run has no viewer.
+     * @param {Object} run  the run from the server
+     */
     function showViewer(run) {
       const box = document.getElementById("sim-viewer");
       const frame = document.getElementById("sim-viewer-frame");
@@ -409,6 +462,11 @@
       viewerShownFor = run.number;
     }
 
+    /**
+     * Asks the server to stop this session's run, then polls to show
+     * "stopping" and "stopped".
+     * @returns {Promise<void>}
+     */
     async function stopSimulation() {
       document.getElementById("sim-stop").disabled = true;
       try {
@@ -422,6 +480,12 @@
       }
     }
 
+    /**
+     * Fetches the run's new output lines and status, shows them, and polls
+     * again in a second while the run is active. Goes back to the login page
+     * if the login has expired.
+     * @returns {Promise<void>}
+     */
     async function pollRun() {
       clearTimeout(pollTimer);
       try {
@@ -452,6 +516,11 @@
       }
     }
 
+    /**
+     * Updates the run panel: title, status badge, times, buttons, window,
+     * results, and appends the new output (staying scrolled to the bottom).
+     * @param {Object} run  the run from the server
+     */
     function showRun(run) {
       const running = run.status === "starting" || run.status === "running" || run.status === "stopping";
 
@@ -490,6 +559,11 @@
     // The physics twin's scripted flight: its numbers and its plot, once it has landed
     let resultsShownFor = null;
 
+    /**
+     * Shows the physics twin's results (summary, steps, flight plot) once its
+     * flight has finished; hides the box for any other run.
+     * @param {Object} run  the run from the server
+     */
     function showResults(run) {
       const box = document.getElementById("sim-results");
       if (!run.results) {
