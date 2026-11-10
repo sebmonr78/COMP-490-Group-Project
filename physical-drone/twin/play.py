@@ -19,6 +19,10 @@ corner, the keys and the mouse.
                                          H    hide / show this help
     Esc           quit
 
+On the floor the drone is ROLLING: the motors are off and the same keys drive
+the cage along the floor like a wheel (Up / Down roll, Left / Right turn, Shift
+faster). 1 takes off from there; landing (L) ends back in Rolling.
+
 Like PX4's Position mode, a key asks for a speed and letting go stops the
 drone where it is. The view moves with the drone: what you turn, zoom or
 slide is kept relative to it.
@@ -87,6 +91,16 @@ DOWN = (0.5, 0.7)
 ACCEL = 2.0                   # m/s^2: how fast the asked speed changes
 LEASH = 0.3                   # m: the target never runs further than this ahead
 
+# Rolling (on the floor, motors off, the cage a wheel): the same keys, driven
+# along the floor. The drive is a model, not a measured part: a horizontal force
+# on the cage's centre (what a tilted thrust or a hub motor would give), capped
+# at ROLL_ACCEL, and a yaw torque on the frame.
+ROLL = (0.6, 1.2)             # m/s along the floor (and with Shift)
+ROLL_ACCEL = 2.0              # m/s^2 at most
+ROLL_GAIN = 4.0               # 1/s: how hard the drive chases the asked speed
+ROLL_EFFICIENCY = 0.4         # drive watts = mechanical watts / this, plus ROLL_IDLE_W
+ROLL_IDLE_W = 3.0
+
 K = glfw
 FORWARD_KEYS, BACK_KEYS = {K.KEY_UP}, {K.KEY_DOWN}
 LEFT_KEYS, RIGHT_KEYS = {K.KEY_LEFT}, {K.KEY_RIGHT}
@@ -112,7 +126,7 @@ class Pilot:
         d = self.twin.data
         self.sp = Setpoint(position=d.qpos[0:3].copy(), yaw=heading(d.qpos[3:7]))
         self.speed = np.zeros(3)                 # world m/s, after the ACCEL limit
-        self.mode = "on the floor"
+        self.mode = "rolling"                    # on the floor it rolls; 1 takes off
         self.lift_from = None
         self.quiet = 0.0
         self.gust_left = 0.0
@@ -128,14 +142,17 @@ class Pilot:
             if self.gust_left <= 0:
                 twin.push = np.zeros(3)
 
-        if self.mode in ("on the floor", "landed"):
+        if self.mode == "rolling":
             if climb > 0:
+                self._stop_rolling()
                 twin.arm(True)
                 self.sp.position = d.qpos[0:3].copy()
+                self.sp.yaw = heading(d.qpos[3:7])
                 self.speed[:] = 0.0
                 self.lift_from = d.qpos[2]
                 self.mode = "taking off"
             else:
+                self._roll(forward, turn, fast, dt)
                 return
 
         if self.mode == "taking off" and d.qpos[2] > self.lift_from + 0.03:
@@ -181,7 +198,48 @@ class Pilot:
         if self.quiet > 0.5:
             twin.arm(False)
             self.speed[:] = 0.0
-            self.mode = "landed"
+            self.sp.yaw = heading(d.qpos[3:7])
+            self.mode = "rolling"
+
+    def _roll(self, forward, turn, fast, dt):
+        """Rolling: forward/back drives along the way the drone faces, turn
+        yaws the frame (the cage turns under it). Motors stay off. Strafing has
+        no key, and a wheel has no sideways drive anyway: steer, then go."""
+        twin, d = self.twin, self.twin.data
+        fast = int(bool(fast))
+
+        if self.braking:                         # Space: no drive until the keys are let go
+            if forward or turn:
+                forward, turn = 0, 0
+            elif np.linalg.norm(d.qvel[0:2]) < 0.02:
+                self.braking = False
+
+        # Yaw: a target heading moved by the key, the frame torqued toward it.
+        yaw = heading(d.qpos[3:7])
+        self.sp.yaw += math.radians(turn * TURN[fast]) * dt
+        self.sp.yaw = yaw + max(-0.5, min(0.5, math.remainder(self.sp.yaw - yaw, 2 * math.pi)))
+        inertia_z = float(twin.body.inertia[2, 2])
+        err = math.remainder(self.sp.yaw - yaw, 2 * math.pi)
+        wz = math.radians(turn * TURN[fast])
+        twin.yaw_torque = inertia_z * max(-40.0, min(40.0, 30.0 * err + 8.0 * (wz - d.qvel[5])))
+
+        # Drive: ease the floor speed toward the asked one, force = mass * accel.
+        ahead = np.array([math.cos(yaw), math.sin(yaw), 0.0])
+        want = forward * ROLL[fast] * ahead
+        v = np.array([d.qvel[0], d.qvel[1], 0.0])
+        accel = ROLL_GAIN * (want - v)
+        size = np.linalg.norm(accel)
+        if size > ROLL_ACCEL:
+            accel *= ROLL_ACCEL / size
+        twin.drive = twin.body.mass * accel
+        twin.drive_watts = ROLL_IDLE_W + abs(float(twin.drive @ v)) / ROLL_EFFICIENCY \
+            + abs(twin.yaw_torque * d.qvel[5]) / ROLL_EFFICIENCY
+        self.speed[:] = 0.0
+
+    def _stop_rolling(self):
+        self.twin.drive = np.zeros(3)
+        self.twin.yaw_torque = 0.0
+        self.twin.drive_watts = 0.0
 
     def land(self):
         if self.mode in ("flying", "taking off"):
@@ -192,6 +250,9 @@ class Pilot:
         and slows to a stop at ACCEL -- snapping it to a halt at 1.7 m/s
         overshot by half a metre and swung back."""
         d = self.twin.data
+        if self.mode == "rolling":
+            self.braking = True
+            return
         self.sp.position = d.qpos[0:3].copy()
         self.speed = d.qvel[0:3].copy()
         self.braking = True
@@ -596,7 +657,7 @@ KEY_NAMES = {K.KEY_UP: "Up", K.KEY_DOWN: "Down", K.KEY_LEFT: "Left", K.KEY_RIGHT
 HELP_KEYS = "\n".join(["Up / Down", "Left / Right", "1 / 0", "Shift", "Space   L   G   R",
                        "F   C   D   H   Esc", "", "left drag", "right drag", "scroll",
                        "double-click", "Ctrl + right drag", "Ctrl + left drag"])
-HELP_DOES = "\n".join(["forward / back", "turn", "up / down (1 on the floor: take off)", "faster",
+HELP_DOES = "\n".join(["forward / back (on the floor: roll)", "turn", "up / down (1 on the floor: take off)", "faster",
                        "stop   land   gust   start again", "follow   centre   chase cam   help   quit", "",
                        "turn the view", "slide the view", "zoom", "pick a thing (again: let go)",
                        "push what is picked", "twist it"])
