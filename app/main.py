@@ -150,33 +150,78 @@ def list_changes(session_id: int, user_id: int = Depends(require_login)):
     )
 
 
-# ---------------------------------------------------------------------------
-# Login, recovery and registration (Log in State Diagram)
+# =============================================================================
+# Login, Recovery and Registration
 #
-# Each endpoint below is one of the "Backend DB" boxes in the diagram.
-# A database problem comes back as a 500, which the page shows as the
-# Server Error Box.
-# ---------------------------------------------------------------------------
+# Component   : Login & Registration endpoints   (Design: Log in State Diagram,
+#               "Backend DB" boxes)
+# Date        : Created 2026-10-19, last updated 2026-10-26
+# Programmer  : Sebastian
+#
+# DESCRIPTION
+#   The backend half of the login page (static/login.html). Logs users in,
+#   finds a forgotten email from a phone number, starts a password reset,
+#   and creates accounts. Any database failure comes back as a 500, which
+#   the page shows as the Server Error Box.
+#
+# IMPORTANT FUNCTIONS
+#   login(LoginInfo) -> {"user_id", "first_name"}       POST /api/login
+#       Checks email + password; on success sets the session cookie.
+#       401 wrong email or password, 429 locked after too many wrong tries.
+#   recover_email(PhoneInfo) -> {"email"}               POST /api/recover-email
+#       The account email for a phone number; 404 if none.
+#   recover_password(PasswordRecoveryInfo) -> {"message"}  POST /api/recover-password
+#       Email + phone must match one account; sends a one-time reset link.
+#   register(RegistrationInfo) -> {"message"}           POST /api/register (201)
+#       Validates every field, rejects taken email/phone, stores the account
+#       with a hashed password. 400 missing or invalid, 409 already taken.
+#
+# IMPORTANT DATA STRUCTURES
+#   LoginInfo, PhoneInfo, PasswordRecoveryInfo, RegistrationInfo
+#       Pydantic models: the JSON body each endpoint accepts.
+#   SESSIONS : dict[token -> (user_id, expires_at)]
+#       Logged-in sessions; the token is the browser's session cookie.
+#   Error detail {"message": str, "fields": list | dict}
+#       Names every bad field at once, so the page can mark each box.
+#
+# ALGORITHMS
+#   Session tokens: 32 random bytes (secrets.token_urlsafe) kept in a
+#   server-side dict with an expiry time. Chosen over signed tokens (JWT)
+#   because a session can be ended at once (logout, password reset) and there
+#   is no signing key to manage; the cost is that a restart logs everyone out.
+#
+#   Normalisation before lookup: emails trimmed and lower-cased, phone numbers
+#   reduced to digits, so "(555) 555-0100" and "555.555.0100" match.
+#
+#   One message for a wrong email and a wrong password, so the page does not
+#   reveal which emails have accounts.
+#
+#   Passwords are stored only as PBKDF2 hashes (see database/passwords.py).
+# =============================================================================
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 MIN_PASSWORD_LENGTH = 8
 
 
 class LoginInfo(BaseModel):
+    """Body of POST /api/login: the email and password typed on the login page."""
     email: str = ""
     password: str = ""
 
 
 class PhoneInfo(BaseModel):
+    """Body of POST /api/recover-email: the phone number on the account."""
     phone_number: str = ""
 
 
 class PasswordRecoveryInfo(BaseModel):
+    """Body of POST /api/recover-password: the account's email and phone number."""
     email: str = ""
     phone_number: str = ""
 
 
 class RegistrationInfo(BaseModel):
+    """Body of POST /api/register: every field of the registration form."""
     first_name: str = ""
     last_name: str = ""
     email: str = ""
@@ -187,16 +232,42 @@ class RegistrationInfo(BaseModel):
 
 
 def clean_email(email):
+    """Trims and lower-cases an email, so lookups ignore case and spaces.
+
+    Args:
+        email (str): as typed.
+
+    Returns:
+        str: the normalised email.
+    """
     return email.strip().lower()
 
 
 def clean_phone(phone):
-    # "(555) 555-0100" and "555.555.0100" both become "5555550100"
+    """Keeps only the digits of a phone number.
+
+    Args:
+        phone (str): as typed, e.g. "(555) 555-0100".
+
+    Returns:
+        str: e.g. "5555550100".
+    """
     return re.sub(r"\D", "", phone)
 
 
 def run(sql, params=()):
-    # Like query(), but turns a database failure into a 500 for the Server Error Box
+    """Runs one query, turning a database failure into a 500 for the Server Error Box.
+
+    Args:
+        sql (str): the query, with ? placeholders.
+        params (tuple): values for the placeholders.
+
+    Returns:
+        list[dict]: the rows.
+
+    Raises:
+        HTTPException(500): the database could not be reached.
+    """
     try:
         return query(sql, params)
     except sqlite3.Error:
@@ -205,10 +276,25 @@ def run(sql, params=()):
 
 @app.get("/login")
 def login_page():
+    """GET /login: the login page (static/login.html)."""
     return FileResponse(STATIC / "login.html")
 
 @app.post("/api/login")
 def login(info: LoginInfo, response: Response):
+    """POST /api/login: logs a user in.
+
+    Args:
+        info (LoginInfo): email and password.
+        response: used to set the session cookie.
+
+    Returns:
+        dict: {"user_id", "first_name"}; the browser gets the session cookie,
+        valid for SESSION_HOURS.
+
+    Raises:
+        HTTPException: 401 wrong email or password (one message for both),
+        429 locked after MAX_LOGIN_FAILURES wrong tries, 500 database error.
+    """
     email = clean_email(info.email)
 
     # Locked out after too many wrong tries? Checked before the password,
@@ -258,6 +344,17 @@ def logout(request: Request, response: Response):
 
 @app.post("/api/recover-email")
 def recover_email(info: PhoneInfo):
+    """POST /api/recover-email: finds the account email for a phone number.
+
+    Args:
+        info (PhoneInfo): the phone number, in any format.
+
+    Returns:
+        dict: {"email": the account's email}.
+
+    Raises:
+        HTTPException: 404 no account has that number, 500 database error.
+    """
     # Backend DB: is phone number in system
     phone = clean_phone(info.phone_number)
     rows = run("SELECT email FROM User WHERE phone_number = ?", (phone,)) if phone else []
@@ -270,6 +367,21 @@ def recover_email(info: PhoneInfo):
 
 @app.post("/api/recover-password")
 def recover_password(info: PasswordRecoveryInfo):
+    """POST /api/recover-password: starts a password reset.
+
+    The email and phone number must belong to the same account. A one-time
+    reset link, valid for RESET_MINUTES, is emailed (see mailer.py), or
+    printed in the server terminal if email is not set up.
+
+    Args:
+        info (PasswordRecoveryInfo): email and phone number.
+
+    Returns:
+        dict: {"message": confirmation that the email was sent}.
+
+    Raises:
+        HTTPException: 404 no matching account, 500 database or mail error.
+    """
     # Backend DB: is email in system (and does the phone number match it)
     email = clean_email(info.email)
     phone = clean_phone(info.phone_number)
@@ -346,6 +458,24 @@ def reset_password(info: ResetInfo):
 
 @app.post("/api/register", status_code=201)
 def register(info: RegistrationInfo):
+    """POST /api/register: creates an account.
+
+    Checks, in order: every field is filled in; the email is valid and both
+    emails match; the password is at least MIN_PASSWORD_LENGTH characters and
+    both passwords match; the phone number has 10 to 15 digits; the email and
+    phone number are not already used. The password is stored hashed.
+
+    Args:
+        info (RegistrationInfo): the registration form.
+
+    Returns:
+        dict: {"message": "Account created"} (HTTP 201).
+
+    Raises:
+        HTTPException: 400 missing or invalid fields, 409 email or phone
+        already taken, 500 database error. 400 and 409 carry
+        {"message", "fields"} naming each bad field.
+    """
     # Backend DB, first box: check all info is filled out and valid
     fields = {
         "first_name": info.first_name.strip(),
