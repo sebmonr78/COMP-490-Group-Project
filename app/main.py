@@ -115,6 +115,24 @@ def list_drones(user_id: int = Depends(require_login)):
     )
 
 
+@app.get("/api/me")
+def who_am_i(user_id: int = Depends(require_login)):
+    """GET /api/me: who is logged in, for the dashboard header.
+
+    Returns:
+        dict: {"first_name", "last_name", "email"} of the logged-in user.
+        The password hash is never sent.
+
+    Raises:
+        HTTPException: 401 if not logged in (from require_login), or if the
+        account no longer exists.
+    """
+    rows = query("SELECT first_name, last_name, email FROM User WHERE user_id = ?", (user_id,))
+    if not rows:
+        raise HTTPException(status_code=401, detail="You got to log in!! Your drone is in another castle.")
+    return rows[0]
+
+
 @app.get("/api/sessions")
 def list_sessions(user_id: int = Depends(require_login)):
     # Newest scan first, only scans made by this user's drones
