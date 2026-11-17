@@ -167,9 +167,12 @@ def who_am_i(user_id: int = Depends(require_login)):
 
 @app.get("/api/sessions")
 def list_sessions(user_id: int = Depends(require_login)):
-    # Newest scan first, only scans made by this user's drones
+    # Newest scan first, only scans made by this user's drones.
+    # change_count and map_count let the page's scan picker say what is in each scan.
     return query(
-        "SELECT s.session_id, s.drone_id, s.started_at, s.ended_at "
+        "SELECT s.session_id, s.drone_id, s.started_at, s.ended_at, "
+        "(SELECT COUNT(*) FROM ChangeRecord c WHERE c.current_session_id = s.session_id) AS change_count, "
+        "(SELECT COUNT(*) FROM MapRecord m WHERE m.session_id = s.session_id) AS map_count "
         "FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
         "WHERE d.owner_id = ? ORDER BY s.started_at DESC",
         (user_id,),

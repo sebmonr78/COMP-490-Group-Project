@@ -151,6 +151,8 @@ class EachUserSeesOnlyTheirOwnData(AppTest):
         self.assertEqual([d["serial_number"] for d in drones], ["DELTA-SIM-0001"])
         sessions = self.client.get("/api/sessions").json()
         self.assertEqual([s["session_id"] for s in sessions], [2, 1])  # newest first
+        # what the page's scan picker shows for each: how many changes, how many maps
+        self.assertEqual([(s["change_count"], s["map_count"]) for s in sessions], [(4, 1), (0, 1)])
         changes = self.client.get("/api/sessions/2/changes")
         self.assertEqual(changes.status_code, 200)
         self.assertEqual(len(changes.json()), 4)
@@ -534,6 +536,8 @@ class DeltaMapsAreSaved(AppTest):
         after = self.scans(client)
         self.assertEqual(len(after), len(before) + 1)
         self.assertEqual(after[0], max(after))                      # newest first
+        newest = client.get("/api/sessions").json()[0]
+        self.assertEqual((newest["change_count"], newest["map_count"]), (0, 1))   # a map, no changes yet
         self.assertIn(f"[website] Map saved to your account as scan {after[0]}.", run["lines"])
 
     def test_another_user_does_not_see_it(self):
