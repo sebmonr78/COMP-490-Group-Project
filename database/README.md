@@ -28,7 +28,9 @@ If you mess up the database and want a fresh one, run `python3 create_db.py --re
 - `create_db.py` - builds `delta.db` from `schema.sql`
 - `seed.py` - the fake sample data
 - `passwords.py` - hashing and checking login passwords (PBKDF2, built into Python)
+- `import_run.py` - saves a finished DELTA run as a new scan: a session, its files, the map's info, and a picture of the map. Standard library only. The copied files go in `saved_runs/` (not in git)
 - `test_db.py` - the tests
+- `test_import_run.py` - the tests for `import_run.py`
 
 ## Tables
 
@@ -89,5 +91,5 @@ I tried to keep the SQL standard so this is easier (plain SQL, CHECK constraints
 
 ## Still to do
 
-- connect the map view to the front end
-- decide where the image and map files get saved so `storage_url` points to something real
+- save objects and changes from a run (the simulation doesn't produce them yet)
+- the RGB and depth frames still have nowhere to be saved (only map files go in `saved_runs/` so far)

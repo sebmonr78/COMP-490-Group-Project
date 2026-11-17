@@ -123,6 +123,25 @@
       overflow-x: auto;
     }
 
+    /* The map picture for a scan saved from a DELTA run */
+    #map-block {
+      margin: 0.75rem 0 0;
+    }
+
+    #map-block img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      border: 1px solid #c9ccd3;
+      border-radius: 4px;
+    }
+
+    #map-block figcaption {
+      margin-top: 0.3rem;
+      font-size: 0.85rem;
+      color: #555;
+    }
+
     /* The scan picker above the changes table */
     #scan-picker-row label {
       display: block;
@@ -218,6 +237,10 @@
     <label>Scan: <select id="scan-picker"></select></label>
   </div>
   <p id="changes-subtitle" class="subtitle"></p>
+  <figure id="map-block" hidden>
+    <img id="map-image" alt="Map of this scan">
+    <figcaption>The map this scan saved. Grey is not seen yet, white is free floor, dark is walls and furniture. Up is +y.</figcaption>
+  </figure>
   <p id="changes-summary" class="summary"></p>
   <div id="change-filters" class="filters"></div>
   <div class="table-wrap">
@@ -383,6 +406,20 @@
       return niceDate(scan.started_at) + " · " + changes + (scan.map_count ? " · map" : "");
     }
 
+    // Shows the scan's map picture, if it has one (the demo scans don't)
+    function showMapPicture(scan) {
+      const block = document.getElementById("map-block");
+      const image = document.getElementById("map-image");
+      block.hidden = true;
+      image.removeAttribute("src");
+      if (!scan.picture_count) return;
+
+      const id = scan.session_id;
+      image.onload = () => { if (shownScan === id) block.hidden = false; };
+      image.onerror = () => { block.hidden = true; };   // no broken-image icon
+      image.src = "/api/sessions/" + id + "/map";
+    }
+
     // Shows one scan: its date, then what changed in it
     async function showScan(scan) {
       const message = document.getElementById("changes-message");
@@ -394,6 +431,7 @@
       document.getElementById("changes-summary").textContent = "";
       document.getElementById("change-filters").replaceChildren();
       showChanges();
+      showMapPicture(scan);
 
       const latest = scan === scans[0] ? " (latest)" : "";
       document.getElementById("changes-subtitle").textContent =

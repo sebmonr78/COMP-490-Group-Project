@@ -128,7 +128,7 @@ class LoginAndLogout(AppTest):
     def test_logged_out_data_and_simulation_endpoints_return_401(self):
         for method, url in [
             ("get", "/api/drones"), ("get", "/api/me"), ("get", "/api/sessions"),
-            ("get", "/api/sessions/2/changes"),
+            ("get", "/api/sessions/2/changes"), ("get", "/api/sessions/2/map"),
             ("get", "/api/simulations"), ("get", "/api/simulations/run"),
             ("post", "/api/simulations/stop"),
         ]:
@@ -151,8 +151,11 @@ class EachUserSeesOnlyTheirOwnData(AppTest):
         self.assertEqual([d["serial_number"] for d in drones], ["DELTA-SIM-0001"])
         sessions = self.client.get("/api/sessions").json()
         self.assertEqual([s["session_id"] for s in sessions], [2, 1])  # newest first
-        # what the page's scan picker shows for each: how many changes, how many maps
-        self.assertEqual([(s["change_count"], s["map_count"]) for s in sessions], [(4, 1), (0, 1)])
+        # what the page's scan picker shows for each: how many changes, how many maps,
+        # and whether there is a map picture (the demo scans have none)
+        self.assertEqual([(s["change_count"], s["map_count"], s["picture_count"]) for s in sessions],
+                         [(4, 1, 0), (0, 1, 0)])
+        self.assertEqual(self.client.get("/api/sessions/2/map").status_code, 404)
         changes = self.client.get("/api/sessions/2/changes")
         self.assertEqual(changes.status_code, 200)
         self.assertEqual(len(changes.json()), 4)
@@ -537,8 +540,53 @@ class DeltaMapsAreSaved(AppTest):
         self.assertEqual(len(after), len(before) + 1)
         self.assertEqual(after[0], max(after))                      # newest first
         newest = client.get("/api/sessions").json()[0]
-        self.assertEqual((newest["change_count"], newest["map_count"]), (0, 1))   # a map, no changes yet
+        self.assertEqual((newest["change_count"], newest["map_count"], newest["picture_count"]),
+                         (0, 1, 1))                                   # a map and its picture, no changes yet
         self.assertIn(f"[website] Map saved to your account as scan {after[0]}.", run["lines"])
+
+    def test_the_saved_map_picture_can_be_fetched(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        scan = client.get("/api/sessions").json()[0]["session_id"]
+        picture = client.get(f"/api/sessions/{scan}/map")
+        self.assertEqual(picture.status_code, 200)
+        self.assertEqual(picture.headers["content-type"], "image/png")
+        self.assertEqual(picture.headers["cache-control"], "no-store")
+        self.assertEqual(picture.content[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_another_user_cannot_fetch_the_picture(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        scan = client.get("/api/sessions").json()[0]["session_id"]
+        register(self.client, "other@example.com")
+        other = self.browser("other@example.com", "secret123")
+        self.assertEqual(other.get(f"/api/sessions/{scan}/map").status_code, 404)
+        self.assertEqual(other.get("/api/sessions").json(), [])
+
+    def test_a_picture_that_is_gone_or_points_outside_saved_runs_is_a_404(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        scan = client.get("/api/sessions").json()[0]["session_id"]
+        self.assertEqual(client.get(f"/api/sessions/{scan}/map").status_code, 200)
+
+        # a row that points outside saved_runs must not be served, even if the file exists
+        secret = import_run.saved_runs_dir().parent / "secret.png"
+        secret.write_bytes(b"not for you")
+        conn = db.connect()
+        with conn:
+            conn.execute("UPDATE File SET storage_url = 'secret.png' "
+                         "WHERE session_id = ? AND mime_type = 'image/png'", (scan,))
+        conn.close()
+        self.assertEqual(client.get(f"/api/sessions/{scan}/map").status_code, 404)
+
+        # a file that was deleted from disk is a 404 too, not a crash
+        conn = db.connect()
+        with conn:
+            conn.execute("UPDATE File SET storage_url = ? WHERE session_id = ? AND mime_type = 'image/png'",
+                         (f"saved_runs/session-{scan}/map.png", scan))
+        conn.close()
+        (import_run.saved_runs_dir() / f"session-{scan}" / "map.png").unlink()
+        self.assertEqual(client.get(f"/api/sessions/{scan}/map").status_code, 404)
 
     def test_another_user_does_not_see_it(self):
         register(self.client, "other@example.com")

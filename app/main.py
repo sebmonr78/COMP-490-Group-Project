@@ -168,15 +168,57 @@ def who_am_i(user_id: int = Depends(require_login)):
 @app.get("/api/sessions")
 def list_sessions(user_id: int = Depends(require_login)):
     # Newest scan first, only scans made by this user's drones.
-    # change_count and map_count let the page's scan picker say what is in each scan.
+    # change_count, map_count and picture_count let the page's scan picker say what is
+    # in each scan, and tell it whether there is a map picture to show.
     return query(
         "SELECT s.session_id, s.drone_id, s.started_at, s.ended_at, "
         "(SELECT COUNT(*) FROM ChangeRecord c WHERE c.current_session_id = s.session_id) AS change_count, "
-        "(SELECT COUNT(*) FROM MapRecord m WHERE m.session_id = s.session_id) AS map_count "
+        "(SELECT COUNT(*) FROM MapRecord m WHERE m.session_id = s.session_id) AS map_count, "
+        "(SELECT COUNT(*) FROM File f WHERE f.session_id = s.session_id "
+        "AND f.file_type = 'map_export' AND f.mime_type = 'image/png') AS picture_count "
         "FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
         "WHERE d.owner_id = ? ORDER BY s.started_at DESC",
         (user_id,),
     )
+
+
+@app.get("/api/sessions/{session_id}/map")
+def scan_map_picture(session_id: int, user_id: int = Depends(require_login)):
+    """The picture (PNG) of a saved scan's map, for the dashboard.
+
+    Only scans saved from a DELTA run have one (see import_run.py); the demo
+    scans don't.
+
+    Args:
+        session_id (int): the scan.
+        user_id (int): the logged-in user (from the ticket).
+
+    Returns:
+        FileResponse: the .png, never cached.
+
+    Raises:
+        HTTPException: 404 if the scan isn't theirs, has no picture, or the
+        file is gone from disk. Same answer for all three, so nobody can tell
+        which scan numbers exist by guessing.
+    """
+    rows = query(
+        "SELECT f.storage_url FROM File f "
+        "JOIN Session s ON s.session_id = f.session_id "
+        "JOIN Drone d ON d.drone_id = s.drone_id "
+        "WHERE f.session_id = ? AND d.owner_id = ? "
+        "AND f.file_type = 'map_export' AND f.mime_type = 'image/png'",
+        (session_id, user_id),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Map picture not found")
+
+    # storage_url is "saved_runs/session-N/map.png", relative to the folder the
+    # database file is in. Never serve anything that isn't inside saved_runs.
+    saved = import_run.saved_runs_dir()
+    path = (saved.parent / rows[0]["storage_url"]).resolve()
+    if saved not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="Map picture not found")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/sessions/{session_id}/changes")

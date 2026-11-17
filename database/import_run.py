@@ -2,28 +2,38 @@
 
 A DELTA run leaves a "memory" folder behind (see simulation/delta/brain/loop.py):
 
-    grid.npz     the 2D map, with its resolution and origin inside
+    grid.npz     the 2D map: three layers, with its resolution and origin inside
     replica.ply  the 3D replica (only written by the final save)
     meta.json    scene, pose source, saved time
 
 import_run() turns one of those folders into rows for one user:
 
     Session      one row, on the user's drone, from the run's start to its end
-    File         one row each for grid.npz and replica.ply (file type 'map_export')
+    File         one row each for grid.npz, replica.ply and map.png (type 'map_export')
     MapRecord    the map's resolution (metres per cell) and origin
+
+map.png is a small picture of the map for the dashboard, drawn here from the
+"solid" layer of grid.npz (the map as you would draw it: walls, tables and
+sofas solid). Drawing it is best effort: a map that can't be drawn is still saved.
 
 The files are copied out of the run's folder first, because the website reuses
 that folder for the next run. Objects and changes are not saved here: the
 simulation does not produce them yet (items 6 and 7 of its ROADMAP).
 
+Everything is read with the standard library, so the app needs no numpy or
+Pillow. An .npz is a zip of .npy files, and a PNG is a few small chunks.
+
     import import_run
     session_id = import_run.import_run(user_id, memory_folder, started_at, ended_at)
 """
 
+import array
 import ast
 import shutil
 import struct
+import sys
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,8 +41,20 @@ import db
 
 MAP_FILE = "grid.npz"
 REPLICA_FILE = "replica.ply"
+PICTURE_FILE = "map.png"
 SAVED_FOLDER = "saved_runs"      # next to the database file; not committed
 CLOCK_SLACK = 2                  # seconds the map's file time may be older than the run's start
+
+# The same thresholds the simulation uses (simulation/config/brain.json,
+# occupancy.free_below and occupied_above): a cell is free below the first,
+# solid above the second, and not seen yet in between.
+FREE_BELOW = -0.4
+OCCUPIED_ABOVE = 1.2
+
+PICTURE_MARGIN = 10              # cells of "not seen" shown around the explored part
+PICTURE_WIDTH = 700              # about this many pixels across (whole-number zoom)
+NOT_SEEN, FREE, SOLID = 0, 1, 2
+COLOURS = {NOT_SEEN: b"\xd9\xdb\xe0", FREE: b"\xff\xff\xff", SOLID: b"\x1f\x29\x37"}
 
 
 def saved_runs_dir():
@@ -40,18 +62,19 @@ def saved_runs_dir():
     return Path(db.db_path()).resolve().parent / SAVED_FOLDER
 
 
-def read_floats(npz_path, name):
-    """Reads one small float array out of a .npz file, with no numpy needed.
+def read_array(npz_path, name):
+    """Reads one float array out of a .npz file, with no numpy needed.
 
     An .npz is a zip of .npy files, and an .npy is a short header followed by
     the raw numbers.
 
     Args:
         npz_path (Path): the .npz file.
-        name (str): the array's name, e.g. "resolution".
+        name (str): the array's name, e.g. "solid_layer".
 
     Returns:
-        list[float]: its values (one for a single number, two for an origin).
+        tuple[array.array, tuple]: the numbers, flat and row by row, and the
+        array's shape, e.g. (1200, 1200). A single number has shape ().
 
     Raises:
         ValueError: the array is not a plain little-endian float array.
@@ -68,13 +91,105 @@ def read_floats(npz_path, name):
         header_length, start = struct.unpack("<I", data[8:12])[0], 12
 
     header = ast.literal_eval(data[start:start + header_length].decode("latin1").strip())
-    kinds = {"<f8": ("d", 8), "<f4": ("f", 4)}
-    if header["descr"] not in kinds:
-        raise ValueError(f"{name}.npy holds {header['descr']}, not floats")
+    kinds = {"<f8": "d", "<f4": "f"}
+    if header["descr"] not in kinds or header["fortran_order"]:
+        raise ValueError(f"{name}.npy holds {header['descr']}, not plain floats")
 
-    code, size = kinds[header["descr"]]
-    body = data[start + header_length:]
-    return list(struct.unpack(f"<{len(body) // size}{code}", body))
+    values = array.array(kinds[header["descr"]])
+    values.frombytes(data[start + header_length:])
+    if sys.byteorder == "big":
+        values.byteswap()                 # the file is little-endian
+    shape = tuple(header["shape"])
+    expected = 1
+    for size in shape:
+        expected *= size
+    if len(values) != expected:
+        raise ValueError(f"{name}.npy is cut short")
+    return values, shape
+
+
+def read_floats(npz_path, name):
+    """A small float array out of a .npz as a list: one number, or an origin's two."""
+    return list(read_array(npz_path, name)[0])
+
+
+def png_bytes(width, height, rows):
+    """A PNG file from rows of RGB bytes (8 bits a colour, no filtering).
+
+    Args:
+        width, height (int): size in pixels.
+        rows (list[bytes]): `height` rows of `width * 3` bytes each.
+
+    Returns:
+        bytes: the whole .png file.
+    """
+    def chunk(kind, body):
+        crc = zlib.crc32(kind + body) & 0xFFFFFFFF
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
+
+    raw = b"".join(b"\x00" + row for row in rows)       # each row starts with filter type 0
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6))
+            + chunk(b"IEND", b""))
+
+
+def draw_map(grid_path):
+    """A picture (PNG) of a saved map: grey not seen, white free floor, dark solid.
+
+    Draws the "solid" layer, cropped to the part the drone explored plus a
+    small margin (the grid itself covers 60 m), zoomed in by a whole number
+    so it is about PICTURE_WIDTH pixels across. Up in the picture is +y.
+
+    Args:
+        grid_path (Path): a grid.npz.
+
+    Returns:
+        bytes | None: the .png file, or None if nothing was seen yet.
+
+    Raises:
+        ValueError, KeyError, zipfile.BadZipFile, OSError: the layer is missing
+        or not what the simulation writes.
+    """
+    values, shape = read_array(grid_path, "solid_layer")
+    if len(shape) != 2:
+        raise ValueError("solid_layer is not a grid")
+    rows, columns = shape
+
+    cells = bytearray(len(values))
+    for index, value in enumerate(values):
+        if value < FREE_BELOW:
+            cells[index] = FREE
+        elif value > OCCUPIED_ABOVE:
+            cells[index] = SOLID
+
+    # The part that was seen
+    first_row = first_column = None
+    last_row = last_column = None
+    for row in range(rows):
+        line = cells[row * columns:(row + 1) * columns]
+        if line.count(NOT_SEEN) == columns:
+            continue
+        seen = [i for i, cell in enumerate(line) if cell != NOT_SEEN]
+        if first_row is None:
+            first_row = row
+        last_row = row
+        first_column = seen[0] if first_column is None else min(first_column, seen[0])
+        last_column = seen[-1] if last_column is None else max(last_column, seen[-1])
+    if first_row is None:
+        return None
+
+    first_row, first_column = max(0, first_row - PICTURE_MARGIN), max(0, first_column - PICTURE_MARGIN)
+    last_row, last_column = min(rows - 1, last_row + PICTURE_MARGIN), min(columns - 1, last_column + PICTURE_MARGIN)
+    width, height = last_column - first_column + 1, last_row - first_row + 1
+    zoom = max(1, PICTURE_WIDTH // max(width, height))
+
+    picture_rows = []
+    for row in range(last_row, first_row - 1, -1):      # +y up: the highest row is drawn first
+        line = b"".join(COLOURS[cell] * zoom
+                        for cell in cells[row * columns + first_column:row * columns + last_column + 1])
+        picture_rows.extend([line] * zoom)
+    return png_bytes(width * zoom, height * zoom, picture_rows)
 
 
 def find_or_make_drone(conn, user_id):
@@ -150,22 +265,33 @@ def import_run(user_id, memory_dir, started_at, ended_at, conn=None, saved_dir=N
             destination = saved_dir / f"session-{session_id}"
             destination.mkdir(parents=True, exist_ok=True)
 
+            def add_file(name, mime_type):
+                return conn.execute(
+                    "INSERT INTO File (session_id, drone_id, owner_id, file_type, filename, "
+                    "storage_url, mime_type, size_bytes, captured_at, uploaded_at) "
+                    "VALUES (?, ?, ?, 'map_export', ?, ?, ?, ?, ?, ?)",
+                    (session_id, drone_id, user_id, name,
+                     f"{saved_dir.name}/session-{session_id}/{name}", mime_type,
+                     (destination / name).stat().st_size, ended_at, db.now()),
+                ).lastrowid
+
             map_file_id = None
             for name in (MAP_FILE, REPLICA_FILE):
                 source = memory_dir / name
                 if not source.is_file():
                     continue
                 shutil.copy2(source, destination / name)
-                file_id = conn.execute(
-                    "INSERT INTO File (session_id, drone_id, owner_id, file_type, filename, "
-                    "storage_url, mime_type, size_bytes, captured_at, uploaded_at) "
-                    "VALUES (?, ?, ?, 'map_export', ?, ?, 'application/octet-stream', ?, ?, ?)",
-                    (session_id, drone_id, user_id, name,
-                     f"{saved_dir.name}/session-{session_id}/{name}",
-                     (destination / name).stat().st_size, ended_at, db.now()),
-                ).lastrowid
+                file_id = add_file(name, "application/octet-stream")
                 if name == MAP_FILE:
                     map_file_id = file_id
+
+            try:
+                picture = draw_map(grid)
+            except Exception:
+                picture = None      # a map is worth saving even if it can't be drawn
+            if picture:
+                (destination / PICTURE_FILE).write_bytes(picture)
+                add_file(PICTURE_FILE, "image/png")
 
             conn.execute(
                 "INSERT INTO MapRecord (session_id, file_id, resolution, origin_x, origin_y) "

@@ -87,8 +87,9 @@ It should end with `OK`. The tests use a temporary database (your `delta.db` is 
 - `/dashboard` the main page (needs a login, otherwise it sends you back to `/`)
 - `/api/health` just checks the backend is up
 - `/api/drones` your drones (needs a login)
-- `/api/sessions` your scans, newest first (needs a login)
+- `/api/sessions` your scans, newest first, with how many changes, maps and map pictures each has (needs a login)
 - `/api/sessions/{id}/changes` what moved, appeared, or disappeared in that scan compared to the one before it (needs a login, 404 if it's not your scan)
+- `/api/sessions/{id}/map` the picture of the map a saved DELTA run made (needs a login, 404 if it's not your scan or it has no picture; the demo scans have none)
 - `/api/simulations` the simulations the page can run (all the simulation endpoints need a login too)
 - `POST /api/simulations/{id}/start?where=browser|server` runs one (`delta`, `twin-flight`, `twin-play`, `open-environment`, `brain-checks`, `drone-tests`, `check-setup`)
 - `/api/simulations/run/picture?number=N` the physics twin's flight plot, for your own run
@@ -110,6 +111,7 @@ The Simulations section on the page has a Run button for each of these (the list
   - **Run in browser** shows the window on the page, and your keyboard and mouse control it. Click inside it first.
   - **Run on server** opens it on the server's own monitor instead.
   Stop shuts it down as Esc would: the brain saves its map first (it gets 45 seconds).
+  When the run ends, the website saves that map to your account as a new scan (`database/import_run.py`). It copies the map files into `database/saved_runs/` (not in git), because the next run in the same slot wipes the folder, and draws a picture of the map. The picture shows under *What changed* when you pick that scan. The Output box says `Map saved to your account as scan N.`, or why it couldn't. It saves under whoever started the run, even if they logged out to stop it. Objects and changes aren't saved yet, because the simulation doesn't produce them yet.
 - **Physics twin: scripted flight** runs `python -m twin.fly twin/flights/hover.json` in `../physical-drone`. When it lands, the page shows the hover time, the energy used, each step, and the flight plot.
 - **Physics twin: fly it yourself** runs `python -m twin.play`. Same two buttons as DELTA.
 - **Brain checks** runs `tests/test_brain.py`: the brain's 21 checks, including that it cannot cheat.
@@ -183,5 +185,5 @@ DELTA_SIM_PYTHON=~/miniconda3/envs/habitat/bin/python uvicorn main:app --reload
 
 - keep the login lockout counts in the database (not needed yet; the lockout tests in `test_app.py` would need updating too)
 - try the reset email with a real mail account (the code is ready, see Turning on reset emails)
-- have the simulation save its sessions, maps and objects to the database
-- map view and picking which scan to look at (on hold until the simulation settles)
+- save the objects and changes a DELTA run finds (its map is already saved, but the simulation doesn't produce objects or changes yet)
+- show the changes on top of the map picture
