@@ -76,6 +76,17 @@
       cursor: pointer; 
     }
 
+    .account {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    #whoami {
+      color: #555;
+      font-size: 0.9rem;
+    }
+
     /* Simulations */
     .status.starting, .status.running, .status.stopping { background: #d6e6ff; }
     .status.finished { background: #d4f5dc; }
@@ -105,7 +116,10 @@
       <h1>DELTA</h1>
       <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
     </div>
-    <button id="logout-button">Log out</button>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout-button">Log out</button>
+    </div>
   </header>
 
   <h2>Simulations</h2>
@@ -262,6 +276,21 @@
         }
       } catch (error) {
         message.textContent = "Could not load changes: " + error.message;
+      }
+    }
+
+    // Shows "Logged in as <name>" next to the Log out button
+    async function loadMe() {
+      const whoami = document.getElementById("whoami");
+      try {
+        const response = await fetch("/api/me");
+        if (!response.ok) return;   // header just stays blank, the rest of the page still works
+        const me = await response.json();
+        const name = ((me.first_name || "") + " " + (me.last_name || "")).trim();
+        whoami.textContent = "Logged in as " + (name || me.email);
+        whoami.title = me.email;    // hover to see the email
+      } catch (error) {
+        // header stays blank
       }
     }
 
@@ -609,6 +638,7 @@
     // Run everything as soon as the page opens
     loadSimulations().then(pollRun);
     loadDrones();
+    loadMe();
     loadChanges();
   </script>
   
