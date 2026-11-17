@@ -14,6 +14,7 @@ from pydantic import BaseModel
 sys.path.append(str(Path(__file__).resolve().parents[1] / "database"))
 
 import db
+import import_run
 import mailer
 import passwords
 import simulations
@@ -109,6 +110,11 @@ def count_failure(table, key, limit):
 # people, or one account on two devices, can each run one at the same time.
 # simulations.py reads the same cookie to tell the sessions apart.
 simulations.SESSION_COOKIE = SESSION_COOKIE
+# Two more things simulations.py needs from this file, handed over the same way
+# so it never has to import main.py: who is behind a login ticket, and how to
+# save a finished DELTA run's map to that person's account (database/import_run.py)
+simulations.user_for_session = lambda token: SESSIONS.get(token, (None,))[0]
+simulations.save_finished_run = import_run.import_run
 app.include_router(simulations.router, dependencies=[Depends(require_login)])
 
 @app.get("/")

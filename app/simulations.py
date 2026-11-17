@@ -220,6 +220,13 @@ router = APIRouter(prefix="/api/simulations")
 # that is who a run belongs to. main.py only lets logged-in requests in here.
 SESSION_COOKIE = "delta_session"
 
+# Also filled in by main.py (see there). Until it does, nothing is saved.
+#   user_for_session(token)  the user_id behind a login ticket, or None
+#   save_finished_run(user_id, memory_dir, started_at, ended_at)
+#                            saves a DELTA run's map to that user's account
+user_for_session = None
+save_finished_run = None
+
 # Every session's current (or most recent) run: session token --> run.
 # Guarded by _lock because the reader threads write to the runs while
 # requests read from them.
@@ -467,12 +474,41 @@ def _command_for(sim_id, slot):
 # A run's life
 # ---------------------------------------------------------------------------
 
+def _save_map(run):
+    """Saves a finished DELTA run's map to the account of the user who started it.
+
+    DELTA writes its map to outputs/runs/web-<slot>/memory (run_drone.sh), and
+    the slot's folder is reused by the next run, so this must happen before
+    the slot is freed. The outcome is added to the run's output, where the page
+    shows it. A problem here never stops the run from ending.
+
+    Args:
+        run (dict): a run whose process has ended.
+    """
+    if run["id"] != "delta" or not save_finished_run or not run.get("user_id"):
+        return
+
+    memory_dir = SIMULATION_DIR / "outputs" / "runs" / _slot_values(run["slot"])["run"] / "memory"
+    try:
+        session_id = save_finished_run(run["user_id"], memory_dir, run["started_at"], _now())
+    except Exception as error:
+        message = f"[website] Could not save the map to your account: {error}"
+    else:
+        message = (f"[website] Map saved to your account as scan {session_id}."
+                   if session_id else "[website] No new map to save.")
+
+    with _lock:
+        run["lines"].append(message)
+        run["line_count"] += 1
+
+
 def _read_output(run):
     """Copies a run's output into its log until the process ends.
 
     Runs in a background thread, one per run. When the process exits it
-    stops the run's virtual screen, records the exit code and final status,
-    and removes the run if its owner has logged out meanwhile.
+    stops the run's virtual screen, saves a DELTA run's map to its owner's
+    account, records the exit code and final status, and removes the run if
+    its owner has logged out meanwhile.
 
     Args:
         run (dict): the run, as stored in _runs.
@@ -490,6 +526,9 @@ def _read_output(run):
         run["screen"].stop()
 
     results = _read_results(run) if code == 0 else None
+
+    # Before the slot is given up: the next run in it starts with an empty map folder
+    _save_map(run)
 
     with _lock:
         run["exit_code"] = code
@@ -739,6 +778,8 @@ def start_simulation(sim_id: str, request: Request, where: str = "browser"):
             "slot": slot,
             "viewer": None,
             "results": None,
+            # who started it, noted now: they may be logged out by the time it ends
+            "user_id": user_for_session(owner) if user_for_session else None,
         }
         _runs[owner] = run
 

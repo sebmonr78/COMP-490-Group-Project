@@ -10,6 +10,7 @@ delta.db is never touched, and no real email is ever sent.
 
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -32,11 +33,13 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "database"))
 
 import db
+import import_run
 import seed
 from fastapi.testclient import TestClient
 
 import main
 import simulations
+from test_import_run import fake_memory_folder
 
 DEMO = {"email": "demo@example.com", "password": "demo1234"}
 DEMO_PHONE = "5555550100"
@@ -475,6 +478,118 @@ class SimulationsSideBySide(AppTest):
         self.assertEqual(picture.status_code, 200)
         self.assertEqual(picture.headers["content-type"], "image/png")
         self.assertEqual(theirs.get(run["results"]["picture"]).status_code, 404)
+
+
+# What DELTA does when the page stops it: save its map, then quit. This stand-in
+# copies a ready-made map folder to the place DELTA would write it.
+FAKE_DELTA = [sys.executable, "-c", """
+import shutil, signal, sys, time
+template, memory = sys.argv[1], sys.argv[2]
+def save_and_quit(*_):
+    shutil.copytree(template, memory, copy_function=shutil.copy)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, save_and_quit)
+print("ready", flush=True)
+time.sleep(60)
+"""]
+
+
+class DeltaMapsAreSaved(AppTest):
+    """A finished DELTA run is saved to the account of the user who started it."""
+
+    browser = SimulationsSideBySide.browser
+    wait_for = SimulationsSideBySide.wait_for
+    stop_everything = SimulationsSideBySide.stop_everything
+
+    def setUp(self):
+        super().setUp()
+        self.twin_out = tempfile.TemporaryDirectory()      # stop_everything cleans this up
+        self.sim_dir = Path(self.twin_out.name)
+        fake_memory_folder(self.sim_dir / "template")
+        delta = {"kind": "command", "title": "DELTA", "cwd": str(self.sim_dir),
+                 "command": FAKE_DELTA + [str(self.sim_dir / "template"), "outputs/runs/{run}/memory"],
+                 "description": "", "interactive": False}
+        patches = [
+            mock.patch.dict(simulations.SIMULATIONS, {"delta": delta}, clear=True),
+            mock.patch.object(simulations, "SIMULATION_DIR", self.sim_dir),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.addCleanup(self.stop_everything)
+
+    def scans(self, client):
+        return [s["session_id"] for s in client.get("/api/sessions").json()]
+
+    def run_and_stop(self, client):
+        client.post("/api/simulations/delta/start")
+        self.wait_for(client, "running")
+        client.post("/api/simulations/stop")
+        return self.wait_for(client, "stopped")
+
+    def test_the_map_of_a_stopped_run_shows_up_as_a_new_scan(self):
+        client = self.browser()
+        before = self.scans(client)
+        run = self.run_and_stop(client)
+        after = self.scans(client)
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertEqual(after[0], max(after))                      # newest first
+        self.assertIn(f"[website] Map saved to your account as scan {after[0]}.", run["lines"])
+
+    def test_another_user_does_not_see_it(self):
+        register(self.client, "other@example.com")
+        other = self.browser("other@example.com", "secret123")
+        self.run_and_stop(self.browser())
+        self.assertEqual(self.scans(other), [])
+
+    def test_it_is_saved_for_the_user_even_if_they_logged_out_to_stop_it(self):
+        client = self.browser()
+        before = self.scans(client)
+        client.post("/api/simulations/delta/start")
+        self.wait_for(client, "running")
+        process = next(iter(simulations._runs.values()))["process"]
+        client.post("/api/logout")                         # stops the run; the ticket is gone
+        process.wait(timeout=10)
+
+        again = self.browser()
+        deadline = time.time() + 10
+        while time.time() < deadline and len(self.scans(again)) == len(before):
+            time.sleep(0.05)
+        self.assertEqual(len(self.scans(again)), len(before) + 1)
+
+    def test_a_run_that_made_no_map_saves_nothing(self):
+        shutil.rmtree(self.sim_dir / "template")           # DELTA has nothing to write
+        client = self.browser()
+        before = self.scans(client)
+        run = self.run_and_stop(client)
+        self.assertEqual(self.scans(client), before)
+        self.assertIn("[website] No new map to save.", run["lines"])
+
+    def test_only_delta_runs_are_saved(self):
+        other = dict(simulations.SIMULATIONS["delta"], title="Something else")
+        with mock.patch.dict(simulations.SIMULATIONS, {"other": other}):
+            client = self.browser()
+            before = self.scans(client)
+            client.post("/api/simulations/other/start")
+            self.wait_for(client, "running")
+            client.post("/api/simulations/stop")
+            run = self.wait_for(client, "stopped")
+        self.assertEqual(self.scans(client), before)
+        self.assertFalse([line for line in run["lines"] if line.startswith("[website]")])
+
+    def test_a_failed_save_does_not_stop_the_run_from_ending(self):
+        client = self.browser()
+        with mock.patch.object(simulations, "save_finished_run", side_effect=RuntimeError("boom")):
+            run = self.run_and_stop(client)
+        self.assertEqual(run["status"], "stopped")
+        self.assertIn("[website] Could not save the map to your account: boom", run["lines"])
+
+    def test_the_website_hands_simulations_what_it_needs(self):
+        self.assertIs(simulations.save_finished_run, import_run.import_run)
+        self.assertIsNone(simulations.user_for_session("no-such-ticket"))
+        user_id = login(self.client, **DEMO).json()["user_id"]
+        token = self.client.cookies.get(main.SESSION_COOKIE)
+        self.assertEqual(simulations.user_for_session(token), user_id)
 
 
 if __name__ == "__main__":
