@@ -45,11 +45,16 @@ SESSIONS = {}
 SESSION_COOKIE = "delta_session"
 SESSION_HOURS = 2  # how long a login lasts before you have to log in again
 
-# wrong passwords per email: email --> {"count": wrong tries so far, "locked_until": time}
+# wrong passwords per computer + email: (address, email) --> {"count", "locked_until", "last_try"}
+# keyed by both, so a stranger on another computer can't lock someone out of their account
 # in memory too, so a server restart clears it
 FAILED_LOGINS = {}
-MAX_LOGIN_FAILURES = 5     # wrong tries before the lock
-LOGIN_LOCK_MINUTES = 5     # how long the lock lasts
+# wrong passwords per computer over all emails: address --> same kind of entry
+FAILED_BY_IP = {}
+MAX_LOGIN_FAILURES = 5       # wrong tries (one computer, one email) before the lock
+MAX_IP_FAILURES = 20         # wrong tries from one computer, any emails, before the lock
+LOGIN_LOCK_MINUTES = 5       # how long a lock lasts
+FAILURE_MEMORY_MINUTES = 15  # a computer that stays quiet this long is forgotten
 
 # reset tokens waiting to be used: token --> (user_id, expires_at)
 # in memory, like SESSIONS, so a server restart forgets them
@@ -76,6 +81,27 @@ def require_login(request: Request):
     if user_id is None:
         raise HTTPException(status_code=401, detail="You got to log in!! Your drone is in another castle.")
     return user_id
+
+def client_address(request: Request):
+    """The address of the computer making this request ("unknown" if we can't tell)."""
+    return request.client.host if request.client else "unknown"
+
+def forget_old_failures():
+    """Throws away wrong-try counts for computers that have been quiet for
+    FAILURE_MEMORY_MINUTES, so the two tables can't grow forever."""
+    cutoff = time.time() - FAILURE_MEMORY_MINUTES * 60
+    for table in (FAILED_LOGINS, FAILED_BY_IP):
+        for key in [k for k, entry in table.items() if entry["last_try"] < cutoff]:
+            del table[key]
+
+def count_failure(table, key, limit):
+    """Adds one wrong try for key. At `limit` tries it locks for LOGIN_LOCK_MINUTES."""
+    entry = table.setdefault(key, {"count": 0, "locked_until": 0, "last_try": 0})
+    entry["count"] += 1
+    entry["last_try"] = time.time()
+    if entry["count"] >= limit:
+        entry["locked_until"] = time.time() + LOGIN_LOCK_MINUTES * 60
+        entry["count"] = 0
 
 # The Run buttons for the simulation scripts (see simulations.py)
 # Has to come after require_login: the login check protects all four of its endpoints.
@@ -298,7 +324,7 @@ def login_page():
     return FileResponse(STATIC / "login.html")
 
 @app.post("/api/login")
-def login(info: LoginInfo, response: Response):
+def login(info: LoginInfo, request: Request, response: Response):
     """POST /api/login: logs a user in.
 
     Args:
@@ -311,19 +337,22 @@ def login(info: LoginInfo, response: Response):
 
     Raises:
         HTTPException: 401 wrong email or password (one message for both),
-        429 locked after MAX_LOGIN_FAILURES wrong tries, 500 database error.
+        429 locked after too many wrong tries from this computer, 500 database error.
     """
     email = clean_email(info.email)
+    address = client_address(request)
+    forget_old_failures()
 
-    # Locked out after too many wrong tries? Checked before the password,
-    # so even the right password is refused until the lock runs out.
-    entry = FAILED_LOGINS.get(email)
-    if entry and entry["locked_until"] > time.time():
-        minutes = int((entry["locked_until"] - time.time()) // 60) + 1
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many wrong tries. Try again in {minutes} minute(s).",
-        )
+    # Locked out? Two locks are checked: this computer + this email, and this
+    # computer overall. Checked before the password, so even the right password
+    # is refused until the lock runs out.
+    for entry in (FAILED_LOGINS.get((address, email)), FAILED_BY_IP.get(address)):
+        if entry and entry["locked_until"] > time.time():
+            minutes = int((entry["locked_until"] - time.time()) // 60) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many wrong tries. Try again in {minutes} minute(s).",
+            )
 
     # Backend DB: check if email and password are a correct pair
     rows = run(
@@ -335,15 +364,12 @@ def login(info: LoginInfo, response: Response):
     # doesn't tell strangers which emails have accounts. Emails that don't
     # exist are counted too, so the lock looks the same for them.
     if not rows or not passwords.verify_password(info.password, rows[0]["password_hash"]):
-        entry = FAILED_LOGINS.setdefault(email, {"count": 0, "locked_until": 0})
-        entry["count"] += 1
-        if entry["count"] >= MAX_LOGIN_FAILURES:
-            entry["locked_until"] = time.time() + LOGIN_LOCK_MINUTES * 60
-            entry["count"] = 0
+        count_failure(FAILED_LOGINS, (address, email), MAX_LOGIN_FAILURES)
+        count_failure(FAILED_BY_IP, address, MAX_IP_FAILURES)
         raise HTTPException(status_code=401, detail="Email or password is wrong")
 
     # correct login: forget the wrong tries, then give the browser a session ticket
-    FAILED_LOGINS.pop(email, None)
+    FAILED_LOGINS.pop((address, email), None)
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = (rows[0]["user_id"], time.time() + SESSION_HOURS * 3600)
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",

@@ -82,6 +82,7 @@ class AppTest(unittest.TestCase):
 
         main.SESSIONS.clear()
         main.FAILED_LOGINS.clear()
+        main.FAILED_BY_IP.clear()
         main.RESET_TOKENS.clear()
         self.client = TestClient(main.app)
 
@@ -202,13 +203,30 @@ class Lockout(AppTest):
 
     def test_the_lock_runs_out(self):
         self.wrong_tries(DEMO["email"], 5)
-        main.FAILED_LOGINS[DEMO["email"]]["locked_until"] = time.time() - 1
+        main.FAILED_LOGINS[("testclient", DEMO["email"])]["locked_until"] = time.time() - 1
         self.assertEqual(login(self.client, **DEMO).status_code, 200)
 
     def test_one_email_being_locked_does_not_lock_another(self):
         register(self.client, "other@example.com")
         self.wrong_tries(DEMO["email"], 5)
         self.assertEqual(login(self.client, "other@example.com", "secret123").status_code, 200)
+
+    def test_a_different_computer_is_not_locked_out(self):
+        self.wrong_tries(DEMO["email"], 5)   # this computer is locked for that email
+        elsewhere = TestClient(main.app, client=("10.0.0.2", 50000))
+        self.assertEqual(login(elsewhere, **DEMO).status_code, 200)
+
+    def test_twenty_wrong_tries_from_one_computer_lock_that_computer(self):
+        for number in range(20):
+            self.assertEqual(login(self.client, f"nobody{number}@example.com", "wrong").status_code, 401)
+        # each email was only tried once, but the computer has had 20 wrong tries
+        self.assertEqual(login(self.client, **DEMO).status_code, 429)
+
+    def test_quiet_computers_are_forgotten(self):
+        self.wrong_tries(DEMO["email"], 2)
+        main.FAILED_LOGINS[("testclient", DEMO["email"])]["last_try"] = time.time() - 16 * 60
+        login(self.client, "nobody@example.com", "wrong")   # any login clears out old entries
+        self.assertNotIn(("testclient", DEMO["email"]), main.FAILED_LOGINS)
 
 
 class PasswordReset(AppTest):
