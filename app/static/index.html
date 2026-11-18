@@ -290,6 +290,9 @@
         // Turn the JSON text into a list we can loop through
         const drones = await response.json();
 
+        // Start from an empty table, so loading twice doesn't list every drone twice
+        rows.replaceChildren();
+
         if (drones.length === 0) {
           message.textContent = "No drones yet. They will show up here once a drone is added to your account.";
           return;
@@ -488,6 +491,8 @@
           return;
         }
 
+        // Start from an empty picker, so loading twice doesn't list every scan twice
+        picker.replaceChildren();
         for (const scan of scans) {
           const option = document.createElement("option");
           option.value = scan.session_id;
@@ -496,9 +501,10 @@
         }
         document.getElementById("scan-picker-row").hidden = false;
 
-        picker.addEventListener("change", () => {
+        // "onchange" (not addEventListener) so loading twice doesn't make one pick run twice
+        picker.onchange = () => {
           showScan(scans.find(scan => String(scan.session_id) === picker.value));
-        });
+        };
 
         // Start on the newest scan that has changes (a scan saved from a live run
         // has none yet), or just the newest if none do
