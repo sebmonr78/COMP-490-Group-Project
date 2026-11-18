@@ -259,10 +259,12 @@
       return cell;
     }
 
-    // Turns "2026-10-12 10:00:00" into something like "Oct 12, 2026, 10:00 AM"
+    // Turns a UTC time like "2026-10-12 17:00:00" into the viewer's local time, like "Oct 12, 2026, 10:00 AM"
     // If the date can't be read, it just shows the original text
     function niceDate(text) {
-      const date = new Date(text.replace(" ", "T"));
+      // The database stores times in UTC, like "2026-11-18 04:16:00". Without the
+      // "Z" the browser reads them as local time and shows the UTC clock reading.
+      const date = new Date(text.replace(" ", "T") + "Z");
 
       if (isNaN(date)) {
         return text;
