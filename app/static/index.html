@@ -411,6 +411,21 @@
       return niceDate(scan.started_at) + " · " + changes + (scan.map_count ? " · map" : "");
     }
 
+    // Says why a scan has no changes: the demo scans just have none, the first saved
+    // map has nothing to be compared with, and a later one is compared with the one before
+    function noChangesMessage(scan) {
+      if (!scan.saved_map) return "No changes recorded for this scan.";
+      if (!scan.compared_with) {
+        return "This is the first scan with a saved map, so there is nothing to compare it with yet.";
+      }
+      const earlier = "the scan from " + niceDate(scan.compared_started_at);
+      if (!scan.compared_ok) {
+        return "This scan started from a different spot than " + earlier +
+               ", so the two maps can't be compared.";
+      }
+      return "No changes since " + earlier + ".";
+    }
+
     // Shows the scan's map picture, if it has one (the demo scans don't)
     function showMapPicture(scan) {
       const block = document.getElementById("map-block");
@@ -439,8 +454,9 @@
       showMapPicture(scan);
 
       const latest = scan === scans[0] ? " (latest)" : "";
+      const since = scan.compared_ok ? " · changes since " + niceDate(scan.compared_started_at) : "";
       document.getElementById("changes-subtitle").textContent =
-        "Scan: " + niceDate(scan.started_at) + latest;
+        "Scan: " + niceDate(scan.started_at) + latest + since;
 
       try {
         message.textContent = "Loading changes…";
@@ -458,7 +474,7 @@
         if (shownScan !== scan.session_id) return;
 
         if (changes.length === 0) {
-          message.textContent = "No changes recorded for this scan.";
+          message.textContent = noChangesMessage(scan);
           return;
         }
 

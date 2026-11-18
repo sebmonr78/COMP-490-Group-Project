@@ -270,5 +270,189 @@ class SavingARun(unittest.TestCase):
         self.assertFalse(self.saved.exists() and any(self.saved.iterdir()))
 
 
+def write_grid(folder, cells, origin=(-10.0, -7.5), resolution=0.05, shape=(ROWS, COLUMNS)):
+    """A grid.npz with the given solid layer (flat list, row by row) and map frame."""
+    folder.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(folder / "grid.npz", "w") as archive:
+        archive.writestr("resolution.npy", npy([resolution]))
+        archive.writestr("origin.npy", npy(list(origin)))
+        archive.writestr("solid_layer.npy", npy(cells, shape, "<f4"))
+
+
+def with_block(cells, rows, columns, value=2.0):
+    """A copy of a layer with a rectangle set to `value` (2.0 solid, -1.0 free, 0.0 not seen)."""
+    cells = list(cells)
+    for row in rows:
+        for column in columns:
+            cells[row * COLUMNS + column] = value
+    return cells
+
+
+class ComparingMaps(unittest.TestCase):
+    """The changes between a run's map and the same user's previous saved map."""
+
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp())
+        self.conn = db.init_db(self.folder / "test.db")
+        seed.seed(self.conn)
+        self.memory = self.folder / "memory"
+        self.saved = self.folder / "saved_runs"
+        self.demo_id = self.conn.execute(
+            "SELECT user_id FROM User WHERE email = 'demo@example.com'").fetchone()["user_id"]
+        self.base = solid_layer()
+
+    def tearDown(self):
+        self.conn.close()
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def save(self, cells, user_id=None, **frame):
+        """Saves a run whose map is `cells` and returns its session_id."""
+        write_grid(self.memory, cells, **frame)
+        return import_run.import_run(user_id or self.demo_id, self.memory, db.now(), db.now(),
+                                     conn=self.conn, saved_dir=self.saved)
+
+    def changes(self, session_id):
+        return self.conn.execute(
+            "SELECT * FROM ChangeRecord WHERE current_session_id = ? ORDER BY change_id",
+            (session_id,)).fetchall()
+
+    def test_the_first_scan_is_the_baseline_and_has_no_changes(self):
+        first = self.save(self.base)
+        self.assertEqual(self.changes(first), [])
+
+    def test_the_same_map_twice_has_no_changes(self):
+        self.save(self.base)
+        self.assertEqual(self.changes(self.save(self.base)), [])
+
+    def test_something_that_appeared_is_a_change_with_its_world_position(self):
+        first = self.save(self.base)
+        box = with_block(self.base, range(15, 19), range(25, 29))        # 4 x 4 cells of solid
+        second = self.save(box)
+
+        (change,) = self.changes(second)
+        self.assertEqual(change["change_type"], "appeared")
+        self.assertIsNone(change["object_id"])
+        self.assertEqual((change["previous_session_id"], change["current_session_id"]), (first, second))
+        # columns 25..28 and rows 15..18 are centred on (26.5, 16.5) cells
+        self.assertAlmostEqual(change["x"], -10.0 + 27.0 * 0.05)
+        self.assertAlmostEqual(change["y"], -7.5 + 17.0 * 0.05)
+        self.assertIsNone(change["z"])
+        self.assertEqual(change["description"], "Something appeared here, about 0.2 x 0.2 m")
+
+    def test_something_that_disappeared_is_a_change(self):
+        box = with_block(self.base, range(15, 19), range(25, 29))
+        self.save(box)
+        (change,) = self.changes(self.save(self.base))
+        self.assertEqual(change["change_type"], "disappeared")
+        self.assertEqual(change["description"], "Something is gone from here, about 0.2 x 0.2 m")
+
+    def test_the_size_is_measured_along_x_and_along_y(self):
+        self.save(self.base)
+        wide = with_block(self.base, range(15, 19), range(20, 32))       # 4 rows high, 12 columns wide
+        (change,) = self.changes(self.save(wide))
+        self.assertEqual(change["description"], "Something appeared here, about 0.6 x 0.2 m")
+
+    def test_specks_and_thin_lines_are_not_changes(self):
+        self.save(self.base)
+        speck = with_block(self.base, range(15, 17), range(25, 27))      # 4 cells
+        line = with_block(speck, range(20, 21), range(18, 40))           # 1 cell thick, 22 long
+        self.assertEqual(self.changes(self.save(line)), [])
+
+    def test_the_smallest_thing_that_counts_is_twelve_cells(self):
+        self.save(self.base)
+        eleven = with_block(self.base, range(15, 18), range(25, 29))
+        eleven[15 * COLUMNS + 28] = -1.0                                  # take one cell out of 3 x 4
+        self.assertEqual(self.changes(self.save(eleven)), [])
+        self.save(self.base)                                              # back to the plain map
+        twelve = with_block(self.base, range(15, 18), range(25, 29))      # 3 x 4
+        self.assertEqual(len(self.changes(self.save(twelve))), 1)
+
+    def test_cells_the_earlier_scan_never_saw_are_not_compared(self):
+        self.save(self.base)
+        new_room = with_block(self.base, range(2, 8), range(2, 8))        # rows 2..7 were not seen before
+        self.assertEqual(self.changes(self.save(new_room)), [])
+
+    def test_two_changes_are_listed_biggest_first(self):
+        self.save(self.base)
+        two = with_block(self.base, range(12, 16), range(20, 24))         # 16 cells
+        two = with_block(two, range(20, 26), range(30, 36))               # 36 cells
+        changes = self.changes(self.save(two))
+        self.assertEqual(len(changes), 2)
+        self.assertIn("0.3 x 0.3", changes[0]["description"])             # the 6 x 6 one first
+        self.assertIn("0.2 x 0.2", changes[1]["description"])
+
+    def test_a_long_list_is_cut_to_the_biggest(self):
+        self.save(self.base)
+        three = with_block(self.base, range(12, 16), range(20, 24))
+        three = with_block(three, range(20, 26), range(30, 36))
+        three = with_block(three, range(12, 15), range(36, 40))
+        old = import_run.MAX_CHANGES
+        import_run.MAX_CHANGES = 2
+        try:
+            self.assertEqual(len(self.changes(self.save(three))), 2)
+        finally:
+            import_run.MAX_CHANGES = old
+
+    def test_a_scan_is_compared_with_the_one_just_before_it(self):
+        self.save(self.base)
+        box = with_block(self.base, range(15, 19), range(25, 29))
+        second = self.save(box)
+        third = self.save(box)                                            # nothing new since the second
+        self.assertEqual(self.changes(third), [])
+        self.assertEqual(len(self.changes(second)), 1)
+
+    def test_maps_from_a_different_start_are_not_compared(self):
+        self.save(self.base)
+        box = with_block(self.base, range(15, 19), range(25, 29))
+        shifted = self.save(box, origin=(-9.0, -7.5))                     # started a metre over
+        self.assertIsNotNone(shifted)                                     # the scan is still saved
+        self.assertEqual(self.changes(shifted), [])
+
+    def test_a_start_a_little_off_is_still_compared(self):
+        self.save(self.base)
+        box = with_block(self.base, range(15, 19), range(25, 29))
+        self.assertEqual(len(self.changes(self.save(box, origin=(-10.005, -7.505)))), 1)
+
+    def test_maps_of_a_different_size_or_resolution_are_not_compared(self):
+        self.save(self.base)
+        box = with_block(self.base, range(15, 19), range(25, 29))
+        self.assertEqual(self.changes(self.save(box, resolution=0.1)), [])
+        other = self.save([-1.0] * (20 * 20), shape=(20, 20))
+        self.assertEqual(self.changes(other), [])
+
+    def test_a_scan_with_a_broken_earlier_map_is_still_saved(self):
+        first = self.save(self.base)
+        (self.saved / f"session-{first}" / "grid.npz").write_bytes(b"not a zip")
+        second = self.save(with_block(self.base, range(15, 19), range(25, 29)))
+        self.assertIsNotNone(second)
+        self.assertEqual(self.changes(second), [])
+
+    def test_another_users_scans_are_never_compared(self):
+        self.save(self.base)
+        other = self.conn.execute(
+            "INSERT INTO User (username, email, password_hash) VALUES ('b', 'b@example.com', 'x')").lastrowid
+        self.conn.commit()
+        box = with_block(self.base, range(15, 19), range(25, 29))
+        self.assertEqual(self.changes(self.save(box, user_id=other)), [])
+
+    def test_the_seed_scans_without_a_map_file_do_not_count(self):
+        self.assertEqual(self.changes(self.save(self.base)), [])         # the demo user has seed scans already
+
+    def test_cells_that_touch_corner_to_corner_are_one_region(self):
+        regions = import_run.clusters({(0, 0), (1, 1), (5, 5)})
+        self.assertEqual(sorted(len(r) for r in regions), [1, 2])
+
+    def test_a_region_needs_a_3_by_3_core(self):
+        block = [(r, c) for r in range(3) for c in range(3)]
+        line = [(0, c) for c in range(20)]
+        self.assertTrue(import_run.has_core(block))
+        self.assertFalse(import_run.has_core(line))
+
+    def test_maps_line_up_when_the_frame_matches(self):
+        self.assertTrue(import_run.maps_line_up((0.05, -10, -7.5), (0.05, -10.01, -7.5)))
+        self.assertFalse(import_run.maps_line_up((0.05, -10, -7.5), (0.05, -10.1, -7.5)))
+        self.assertFalse(import_run.maps_line_up((0.05, -10, -7.5), (0.1, -10, -7.5)))
+
+
 if __name__ == "__main__":
     unittest.main()

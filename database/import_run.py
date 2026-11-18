@@ -16,14 +16,26 @@ import_run() turns one of those folders into rows for one user:
     Session      one row, on the user's drone, from the run's start to its end
     File         one row each for grid.npz, replica.ply and map.png (type 'map_export')
     MapRecord    the map's resolution (metres per cell) and origin
+    ChangeRecord what is different from the user's previous saved map (see below)
 
 map.png is a small picture of the map for the dashboard, drawn here from the
 "solid" layer of grid.npz (the map as you would draw it: walls, tables and
 sofas solid). Drawing it is best effort: a map that can't be drawn is still saved.
 
 The files are copied out of the run's folder first, because the website reuses
-that folder for the next run. Objects and changes are not saved here: the
-simulation does not produce them yet (items 6 and 7 of its ROADMAP).
+that folder for the next run. Objects are not saved here: the simulation does
+not produce them yet (item 7 of its ROADMAP).
+
+Changes are worked out here instead, by comparing the new map with the same
+user's previous saved map (find_changes()). The first scan has nothing to be
+compared with, so it is the baseline and gets no changes. Only cells that
+both maps have seen are compared: free floor that is now solid "appeared",
+solid that is now free "disappeared". Nearby cells are grouped into one change,
+and specks and thin lines (a wall that moved a cell between two scans) are
+ignored. Two maps are only compared when they line up, meaning the same
+resolution, size and origin (the origin is where the drone started), because
+otherwise every wall would look like a change. Like the picture, this is best
+effort: if comparing fails, the scan is still saved, just without changes.
 
 Everything is read with the standard library, so the app needs no numpy or
 Pillow. An .npz is a zip of .npy files, and a PNG is a few small chunks.
@@ -60,6 +72,11 @@ PICTURE_MARGIN = 10              # cells of "not seen" shown around the explored
 PICTURE_WIDTH = 700              # about this many pixels across (whole-number zoom)
 NOT_SEEN, FREE, SOLID = 0, 1, 2
 COLOURS = {NOT_SEEN: b"\xd9\xdb\xe0", FREE: b"\xff\xff\xff", SOLID: b"\x1f\x29\x37"}
+
+# Comparing two maps. These are first guesses; check them against real runs.
+ALIGN_TOLERANCE = 0.25           # two origins line up if they are within this part of a cell
+MIN_CHANGE_CELLS = 12            # a change smaller than this (12 cells is about 17 x 17 cm) is a speck
+MAX_CHANGES = 30                 # keep the biggest ones; a long list means the maps are off, not the house
 
 
 def saved_runs_dir():
@@ -173,6 +190,24 @@ def png_bytes(width, height, rows):
             + chunk(b"IEND", b""))
 
 
+def classify_cells(values):
+    """Turns a layer's numbers into NOT_SEEN, FREE or SOLID, one byte per cell.
+
+    Args:
+        values (array.array): a layer of grid.npz, flat.
+
+    Returns:
+        bytearray: the same length as `values`.
+    """
+    cells = bytearray(len(values))
+    for index, value in enumerate(values):
+        if value < FREE_BELOW:
+            cells[index] = FREE
+        elif value > OCCUPIED_ABOVE:
+            cells[index] = SOLID
+    return cells
+
+
 def draw_map(grid_path):
     """A picture (PNG) of a saved map: grey not seen, white free floor, dark solid.
 
@@ -195,12 +230,7 @@ def draw_map(grid_path):
         raise ValueError("solid_layer is not a grid")
     rows, columns = shape
 
-    cells = bytearray(len(values))
-    for index, value in enumerate(values):
-        if value < FREE_BELOW:
-            cells[index] = FREE
-        elif value > OCCUPIED_ABOVE:
-            cells[index] = SOLID
+    cells = classify_cells(values)
 
     # The part that was seen
     first_row = first_column = None
@@ -229,6 +259,152 @@ def draw_map(grid_path):
                         for cell in cells[row * columns + first_column:row * columns + last_column + 1])
         picture_rows.extend([line] * zoom)
     return png_bytes(width * zoom, height * zoom, picture_rows)
+
+
+def maps_line_up(first, second):
+    """True if two maps use the same cells, so their cells can be compared one to one.
+
+    Args:
+        first, second (tuple): (resolution, origin_x, origin_y) of each map,
+            as in MapRecord.
+
+    Returns:
+        bool: same resolution, and origins no more than ALIGN_TOLERANCE of a
+        cell apart.
+    """
+    (resolution, first_x, first_y), (other, second_x, second_y) = first, second
+    if abs(resolution - other) > 1e-9:
+        return False
+    limit = ALIGN_TOLERANCE * resolution
+    return abs(first_x - second_x) <= limit and abs(first_y - second_y) <= limit
+
+
+def clusters(cells):
+    """Groups cells that touch (sideways or diagonally) into separate regions.
+
+    Args:
+        cells (set[tuple]): (row, column) of each cell.
+
+    Returns:
+        list[list[tuple]]: one list of cells per region.
+    """
+    left = set(cells)
+    regions = []
+    while left:
+        start = left.pop()
+        region, queue = [start], [start]
+        while queue:
+            row, column = queue.pop()
+            for next_row in (row - 1, row, row + 1):
+                for next_column in (column - 1, column, column + 1):
+                    neighbour = (next_row, next_column)
+                    if neighbour in left:
+                        left.remove(neighbour)
+                        region.append(neighbour)
+                        queue.append(neighbour)
+        regions.append(region)
+    return regions
+
+
+def has_core(region):
+    """True if some cell of the region has all 8 of its neighbours in it too.
+
+    That means the region is at least 3 x 3 cells somewhere, so a thin line
+    (the edge of a wall that moved a cell between two scans) does not count.
+    """
+    cells = set(region)
+    return any(all((row + dr, column + dc) in cells
+                   for dr in (-1, 0, 1) for dc in (-1, 0, 1))
+               for row, column in region)
+
+
+def find_changes(old_grid, new_grid):
+    """What is different between two saved maps of the same place.
+
+    Only cells that both maps have seen are compared. A cell that was free
+    and is now solid is "appeared", one that was solid and is now free is
+    "disappeared". Regions that are too small or too thin are dropped.
+
+    Args:
+        old_grid, new_grid (Path): the earlier and the later grid.npz.
+
+    Returns:
+        list[dict] | None: None if the two maps do not line up (see
+        maps_line_up()), otherwise the changes, biggest first, at most
+        MAX_CHANGES, each with change_type ('appeared' or 'disappeared'),
+        x and y (world position of the middle, in metres), and width and
+        height (metres, along x and along y).
+
+    Raises:
+        ValueError, KeyError, zipfile.BadZipFile, OSError: a layer is missing
+        or not what the simulation writes.
+    """
+    old_values, old_shape = read_array(old_grid, "solid_layer")
+    new_values, new_shape = read_array(new_grid, "solid_layer")
+    if len(new_shape) != 2 or old_shape != new_shape:
+        return None
+    resolution = read_floats(new_grid, "resolution")[0]
+    origin_x, origin_y = read_floats(new_grid, "origin")[:2]
+    old_resolution = read_floats(old_grid, "resolution")[0]
+    old_x, old_y = read_floats(old_grid, "origin")[:2]
+    if not maps_line_up((old_resolution, old_x, old_y), (resolution, origin_x, origin_y)):
+        return None
+
+    columns = new_shape[1]
+    before, after = classify_cells(old_values), classify_cells(new_values)
+    appeared, disappeared = set(), set()
+    for index, (was, now) in enumerate(zip(before, after)):
+        if was and now and was != now:
+            (appeared if now == SOLID else disappeared).add(divmod(index, columns))
+
+    changes = []
+    for kind, cells in (("appeared", appeared), ("disappeared", disappeared)):
+        for region in clusters(cells):
+            if len(region) < MIN_CHANGE_CELLS or not has_core(region):
+                continue
+            rows = [row for row, _ in region]
+            cols = [column for _, column in region]
+            changes.append({
+                "change_type": kind,
+                "cells": len(region),
+                "x": origin_x + (sum(cols) / len(cols) + 0.5) * resolution,
+                "y": origin_y + (sum(rows) / len(rows) + 0.5) * resolution,
+                "width": (max(cols) - min(cols) + 1) * resolution,
+                "height": (max(rows) - min(rows) + 1) * resolution,
+            })
+    changes.sort(key=lambda change: -change["cells"])
+    return changes[:MAX_CHANGES]
+
+
+def describe_change(change):
+    """A short sentence for the dashboard, like "Something appeared here, about 0.6 x 0.4 m"."""
+    what = "appeared here" if change["change_type"] == "appeared" else "is gone from here"
+    return f"Something {what}, about {change['width']:.1f} x {change['height']:.1f} m"
+
+
+def previous_saved_scan(conn, user_id, session_id, saved_dir):
+    """The user's latest earlier scan that has a saved map file.
+
+    Args:
+        conn: an open database connection.
+        user_id (int): whose scans to look at (only their own drones').
+        session_id (int): the new scan; only earlier ones count.
+        saved_dir (Path): where saved maps are.
+
+    Returns:
+        tuple[int, Path] | None: that scan's session_id and its grid.npz, or
+        None if this is the first one (the baseline).
+    """
+    rows = conn.execute(
+        "SELECT s.session_id FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
+        "WHERE d.owner_id = ? AND s.session_id < ? ORDER BY s.session_id DESC",
+        (user_id, session_id),
+    ).fetchall()
+    for row in rows:
+        path = saved_dir / f"session-{row['session_id']}" / MAP_FILE
+        if path.is_file():
+            return row["session_id"], path
+    return None
 
 
 def find_or_make_drone(conn, user_id):
@@ -269,7 +445,8 @@ def import_run(user_id, memory_dir, started_at, ended_at, conn=None, saved_dir=N
         saved_dir (Path): where to copy the files; default saved_runs_dir().
 
     Returns:
-        int | None: the new session_id, or None if there was nothing to save
+        int | None: the new session_id (its changes since the user's previous
+        saved scan are saved too, see find_changes()), or None if there was nothing to save
         (no map in the folder, or a map older than this run: that folder is
         reused, so an old file there belongs to somebody else's run).
 
@@ -338,6 +515,23 @@ def import_run(user_id, memory_dir, started_at, ended_at, conn=None, saved_dir=N
                 "VALUES (?, ?, ?, ?, ?)",
                 (session_id, map_file_id, resolution, origin_x, origin_y),
             )
+
+            # What changed since this user's last saved scan (none for the first one)
+            earlier = previous_saved_scan(conn, user_id, session_id, saved_dir)
+            changes = []
+            if earlier:
+                try:
+                    changes = find_changes(earlier[1], grid) or []
+                except Exception:
+                    changes = []    # a map is worth saving even if it can't be compared
+            for change in changes:
+                conn.execute(
+                    "INSERT INTO ChangeRecord (object_id, previous_session_id, current_session_id, "
+                    "change_type, x, y, z, description, detected_at) "
+                    "VALUES (NULL, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                    (earlier[0], session_id, change["change_type"], change["x"], change["y"],
+                     describe_change(change), db.now()),
+                )
         return session_id
     except Exception:
         if destination is not None:

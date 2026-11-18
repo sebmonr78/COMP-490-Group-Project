@@ -39,7 +39,7 @@ from fastapi.testclient import TestClient
 
 import main
 import simulations
-from test_import_run import fake_memory_folder
+from test_import_run import fake_memory_folder, solid_layer, with_block, write_grid
 
 DEMO = {"email": "demo@example.com", "password": "demo1234"}
 DEMO_PHONE = "5555550100"
@@ -156,6 +156,9 @@ class EachUserSeesOnlyTheirOwnData(AppTest):
         self.assertEqual([(s["change_count"], s["map_count"], s["picture_count"]) for s in sessions],
                          [(4, 1, 0), (0, 1, 0)])
         self.assertEqual(self.client.get("/api/sessions/2/map").status_code, 404)
+        # the demo scans were not saved from a run, so they are not compared with each other
+        self.assertEqual([(s["saved_map"], s["compared_with"], s["compared_ok"]) for s in sessions],
+                         [(False, None, False), (False, None, False)])
         changes = self.client.get("/api/sessions/2/changes")
         self.assertEqual(changes.status_code, 200)
         self.assertEqual(len(changes.json()), 4)
@@ -491,7 +494,7 @@ FAKE_DELTA = [sys.executable, "-c", """
 import shutil, signal, sys, time
 template, memory = sys.argv[1], sys.argv[2]
 def save_and_quit(*_):
-    shutil.copytree(template, memory, copy_function=shutil.copy)
+    shutil.copytree(template, memory, copy_function=shutil.copy, dirs_exist_ok=True)   # the run folder is reused
     sys.exit(0)
 signal.signal(signal.SIGTERM, save_and_quit)
 print("ready", flush=True)
@@ -544,6 +547,42 @@ class DeltaMapsAreSaved(AppTest):
         self.assertEqual((newest["change_count"], newest["map_count"], newest["picture_count"]),
                          (0, 1, 1))                                   # a map and its picture, no changes yet
         self.assertIn(f"[website] Map saved to your account as scan {after[0]}.", run["lines"])
+
+    def test_the_first_saved_map_is_the_baseline_and_the_next_is_compared_with_it(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        self.run_and_stop(client)
+        second, first = client.get("/api/sessions").json()[:2]
+        self.assertEqual((first["saved_map"], first["compared_with"], first["compared_ok"]),
+                         (True, None, False))
+        self.assertEqual((second["saved_map"], second["compared_with"], second["compared_ok"]),
+                         (True, first["session_id"], True))
+        self.assertEqual(second["compared_started_at"], first["started_at"])
+        self.assertEqual(client.get(f"/api/sessions/{second['session_id']}/changes").json(), [])
+
+    def test_a_map_from_a_different_start_is_marked_as_not_comparable(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        write_grid(self.sim_dir / "template" / "102816036" / "rtabmap",
+                   solid_layer(), origin=(-3.0, -7.5))
+        self.run_and_stop(client)
+        second = client.get("/api/sessions").json()[0]
+        self.assertTrue(second["saved_map"])
+        self.assertIsNotNone(second["compared_with"])
+        self.assertFalse(second["compared_ok"])
+
+    def test_what_changed_between_two_runs_shows_up_in_the_changes_list(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        write_grid(self.sim_dir / "template" / "102816036" / "rtabmap",
+                   with_block(solid_layer(), range(15, 19), range(25, 29)))
+        self.run_and_stop(client)
+        second, first = client.get("/api/sessions").json()[:2]
+        self.assertEqual((first["change_count"], second["change_count"]), (0, 1))
+        (change,) = client.get(f"/api/sessions/{second['session_id']}/changes").json()
+        self.assertEqual(change["change_type"], "appeared")
+        self.assertIsNone(change["label"])                          # not tied to an object
+        self.assertEqual(change["description"], "Something appeared here, about 0.2 x 0.2 m")
 
     def test_the_saved_map_picture_can_be_fetched(self):
         client = self.browser()

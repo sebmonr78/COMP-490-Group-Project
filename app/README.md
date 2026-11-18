@@ -87,8 +87,8 @@ It should end with `OK`. The tests use a temporary database (your `delta.db` is 
 - `/dashboard` the main page (needs a login, otherwise it sends you back to `/`)
 - `/api/health` just checks the backend is up
 - `/api/drones` your drones (needs a login)
-- `/api/sessions` your scans, newest first, with how many changes, maps and map pictures each has (needs a login)
-- `/api/sessions/{id}/changes` what moved, appeared, or disappeared in that scan compared to the one before it (needs a login, 404 if it's not your scan)
+- `/api/sessions` your scans, newest first, with how many changes, maps and map pictures each has, and which earlier scan it was compared with and whether the two maps lined up (needs a login)
+- `/api/sessions/{id}/changes` what moved, appeared, or disappeared in that scan compared to the one before it (needs a login, 404 if it's not your scan). For scans saved from a DELTA run these come from comparing its map with your previous saved map when the run is saved (see `database/import_run.py`); your first saved scan is the baseline and has none
 - `/api/sessions/{id}/map` the picture of the map a saved DELTA run made (needs a login, 404 if it's not your scan or it has no picture; the demo scans have none)
 - `/api/simulations` the simulations the page can run (all the simulation endpoints need a login too)
 - `POST /api/simulations/{id}/start?where=browser|server` runs one (`delta`, `twin-flight`, `twin-play`, `open-environment`, `brain-checks`, `drone-tests`, `check-setup`)

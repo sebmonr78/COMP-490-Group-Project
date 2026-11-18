@@ -176,16 +176,45 @@ def list_sessions(user_id: int = Depends(require_login)):
     # Newest scan first, only scans made by this user's drones.
     # change_count, map_count and picture_count let the page's scan picker say what is
     # in each scan, and tell it whether there is a map picture to show.
-    return query(
+    scans = query(
         "SELECT s.session_id, s.drone_id, s.started_at, s.ended_at, "
         "(SELECT COUNT(*) FROM ChangeRecord c WHERE c.current_session_id = s.session_id) AS change_count, "
         "(SELECT COUNT(*) FROM MapRecord m WHERE m.session_id = s.session_id) AS map_count, "
         "(SELECT COUNT(*) FROM File f WHERE f.session_id = s.session_id "
         "AND f.file_type = 'map_export' AND f.mime_type = 'image/png') AS picture_count "
         "FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
-        "WHERE d.owner_id = ? ORDER BY s.started_at DESC",
+        "WHERE d.owner_id = ? ORDER BY s.started_at DESC, s.session_id DESC",
         (user_id,),
     )
+
+    # Scans saved from a DELTA run (they have a grid.npz) are compared with the
+    # user's previous one when they are saved (import_run.py). So that the page can
+    # say why a scan has no changes: saved_map, compared_with (the earlier scan's
+    # id, None for the first), compared_started_at, and compared_ok (the two maps
+    # line up, so they could be compared).
+    maps = query(
+        "SELECT s.session_id, m.resolution, m.origin_x, m.origin_y FROM Session s "
+        "JOIN Drone d ON d.drone_id = s.drone_id "
+        "JOIN MapRecord m ON m.session_id = s.session_id "
+        "JOIN File f ON f.file_id = m.file_id AND f.filename = ? "
+        "WHERE d.owner_id = ? ORDER BY s.session_id",
+        (import_run.MAP_FILE, user_id),
+    )
+    frame = {m["session_id"]: (m["resolution"], m["origin_x"], m["origin_y"]) for m in maps}
+    earlier = {}
+    last = None
+    for m in maps:
+        earlier[m["session_id"]] = last
+        last = m["session_id"]
+    started = {s["session_id"]: s["started_at"] for s in scans}
+    for scan in scans:
+        before = earlier.get(scan["session_id"])
+        scan["saved_map"] = scan["session_id"] in frame
+        scan["compared_with"] = before
+        scan["compared_started_at"] = started.get(before)
+        scan["compared_ok"] = (before is not None
+                               and import_run.maps_line_up(frame[before], frame[scan["session_id"]]))
+    return scans
 
 
 @app.get("/api/sessions/{session_id}/map")
