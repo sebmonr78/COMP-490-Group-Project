@@ -510,7 +510,8 @@ class DeltaMapsAreSaved(AppTest):
         super().setUp()
         self.twin_out = tempfile.TemporaryDirectory()      # stop_everything cleans this up
         self.sim_dir = Path(self.twin_out.name)
-        fake_memory_folder(self.sim_dir / "template")
+        # laid out like a real run: memory/<scene>/<pose source>/ holds the map
+        fake_memory_folder(self.sim_dir / "template" / "102816036" / "rtabmap")
         delta = {"kind": "command", "title": "DELTA", "cwd": str(self.sim_dir),
                  "command": FAKE_DELTA + [str(self.sim_dir / "template"), "outputs/runs/{run}/memory"],
                  "description": "", "interactive": False}

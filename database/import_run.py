@@ -1,10 +1,15 @@
 """Saving a finished simulation run into the database.
 
-A DELTA run leaves a "memory" folder behind (see simulation/delta/brain/loop.py):
+A DELTA run leaves a "memory" folder behind (see simulation/delta/brain/loop.py).
+The map files are not in it directly but in a folder for the scene and the pose
+source, for example memory/102816036/rtabmap/:
 
     grid.npz     the 2D map: three layers, with its resolution and origin inside
     replica.ply  the 3D replica (only written by the final save)
     meta.json    scene, pose source, saved time
+
+(Starting a run with --fresh, which the website does, moves the earlier map to
+a folder ending in .previous. Those are never saved.)
 
 import_run() turns one of those folders into rows for one user:
 
@@ -60,6 +65,40 @@ COLOURS = {NOT_SEEN: b"\xd9\xdb\xe0", FREE: b"\xff\xff\xff", SOLID: b"\x1f\x29\x
 def saved_runs_dir():
     """Where copies of saved maps go: a saved_runs folder next to the database file."""
     return Path(db.db_path()).resolve().parent / SAVED_FOLDER
+
+
+def find_map_folder(memory_dir):
+    """The folder inside a run's memory folder that holds the map.
+
+    DELTA writes it to memory/<scene>/<pose source>/, so that is looked at
+    first, but a map directly in memory/ or in memory/<scene>/ is found too.
+    Folders ending in .previous (the map of the run before, kept by --fresh)
+    are skipped.
+
+    Args:
+        memory_dir (Path): the run's memory folder.
+
+    Returns:
+        Path | None: the folder with the newest grid.npz in it, or None if
+        there is no map anywhere in there.
+    """
+    memory_dir = Path(memory_dir)
+    if not memory_dir.is_dir():
+        return None
+
+    def folders_in(folder):
+        return [p for p in sorted(folder.iterdir())
+                if p.is_dir() and not p.name.endswith(".previous")]
+
+    candidates = [memory_dir]
+    for scene in folders_in(memory_dir):
+        candidates.append(scene)
+        candidates.extend(folders_in(scene))
+
+    with_a_map = [c for c in candidates if (c / MAP_FILE).is_file()]
+    if not with_a_map:
+        return None
+    return max(with_a_map, key=lambda c: (c / MAP_FILE).stat().st_mtime)
 
 
 def read_array(npz_path, name):
@@ -221,7 +260,8 @@ def import_run(user_id, memory_dir, started_at, ended_at, conn=None, saved_dir=N
 
     Args:
         user_id (int): the user who ran it.
-        memory_dir (str | Path): the run's memory folder.
+        memory_dir (str | Path): the run's memory folder (the map itself is
+            found inside it, see find_map_folder()).
         started_at (str): when the run started, "YYYY-MM-DD HH:MM:SS" UTC.
         ended_at (str): when it ended, same format.
         conn: an open connection to use (the tests pass one); default opens the
@@ -237,10 +277,10 @@ def import_run(user_id, memory_dir, started_at, ended_at, conn=None, saved_dir=N
         sqlite3.Error: the database refused a row (nothing is saved then).
         OSError: a file could not be copied (nothing is saved then).
     """
-    memory_dir = Path(memory_dir)
-    grid = memory_dir / MAP_FILE
-    if not grid.is_file():
+    folder = find_map_folder(memory_dir)
+    if folder is None:
         return None
+    grid = folder / MAP_FILE
 
     started = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     if grid.stat().st_mtime < started.timestamp() - CLOCK_SLACK:
@@ -277,7 +317,7 @@ def import_run(user_id, memory_dir, started_at, ended_at, conn=None, saved_dir=N
 
             map_file_id = None
             for name in (MAP_FILE, REPLICA_FILE):
-                source = memory_dir / name
+                source = folder / name
                 if not source.is_file():
                     continue
                 shutil.copy2(source, destination / name)

@@ -209,6 +209,59 @@ class SavingARun(unittest.TestCase):
         self.assertIsNone(self.save())
         self.assertEqual(self.count("Session"), before)
 
+    # What a real DELTA run leaves: memory/<scene>/<pose source>/ with the map in it,
+    # and (because the website starts runs with --fresh) the run before in <pose>.previous.
+
+    def real_layout(self, scene="102816036"):
+        self.memory.mkdir(parents=True, exist_ok=True)
+        (self.memory / ".in-use").write_text("")         # DELTA leaves this empty marker too
+        return self.memory / scene / "rtabmap"
+
+    def test_a_map_in_the_scene_and_pose_folders_is_found(self):
+        shutil.rmtree(self.memory)
+        fake_memory_folder(self.real_layout())
+        session_id = self.save()
+        self.assertEqual(self.names(session_id), ["grid.npz", "map.png", "replica.ply"])
+        record = self.conn.execute("SELECT * FROM MapRecord WHERE session_id = ?", (session_id,)).fetchone()
+        self.assertEqual((record["resolution"], record["origin_x"]), (0.05, -10.0))
+
+    def test_the_previous_runs_map_is_never_saved(self):
+        shutil.rmtree(self.memory)
+        fake_memory_folder(self.real_layout(), replica=False)                # this run: no replica
+        previous = self.memory / "102816036" / "rtabmap.previous"
+        fake_memory_folder(previous, replica=True)                           # the run before: has one
+        future = time.time() + 100                                           # and looks NEWER
+        os.utime(previous / "grid.npz", (future, future))
+        self.assertEqual(self.names(self.save()), ["grid.npz", "map.png"])   # so it was not the one used
+
+    def test_only_a_previous_map_means_nothing_to_save(self):
+        shutil.rmtree(self.memory)
+        fake_memory_folder(self.real_layout().with_name("rtabmap.previous"))
+        before = self.count("Session")
+        self.assertIsNone(self.save())
+        self.assertEqual(self.count("Session"), before)
+
+    def test_the_newest_of_several_scenes_is_used(self):
+        shutil.rmtree(self.memory)
+        old = self.real_layout("111")
+        fake_memory_folder(old, replica=True)
+        long_ago = time.time() - 3600
+        os.utime(old / "grid.npz", (long_ago, long_ago))
+        fake_memory_folder(self.real_layout("222"), replica=False)
+        self.assertEqual(self.names(self.save()), ["grid.npz", "map.png"])
+
+    def test_an_old_map_in_the_real_layout_is_not_saved(self):
+        shutil.rmtree(self.memory)
+        folder = self.real_layout()
+        fake_memory_folder(folder)
+        long_ago = time.time() - 3600
+        os.utime(folder / "grid.npz", (long_ago, long_ago))
+        self.assertIsNone(self.save())
+
+    def test_a_memory_folder_that_does_not_exist_saves_nothing(self):
+        shutil.rmtree(self.memory)
+        self.assertIsNone(self.save())
+
     def test_a_database_error_saves_nothing(self):
         before = (self.count("Session"), self.count("Drone"), self.count("File"))
         with self.assertRaises(sqlite3.IntegrityError):
