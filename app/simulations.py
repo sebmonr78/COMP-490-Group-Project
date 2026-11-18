@@ -226,6 +226,7 @@ SESSION_COOKIE = "delta_session"
 #                            saves a DELTA run's map to that user's account
 user_for_session = None
 save_finished_run = None
+find_map_folder = None
 
 # Every session's current (or most recent) run: session token --> run.
 # Guarded by _lock because the reader threads write to the runs while
@@ -474,6 +475,33 @@ def _command_for(sim_id, slot):
 # A run's life
 # ---------------------------------------------------------------------------
 
+def _map_file(slot):
+    memory_dir = SIMULATION_DIR / "outputs" / "runs" / _slot_values(slot)["run"] / "memory"
+    folder = find_map_folder(memory_dir) if find_map_folder else memory_dir
+    return (folder or memory_dir) / "grid.npz"
+
+
+def _map_fingerprint(path):
+    try:
+        info = path.stat()
+        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size
+    except FileNotFoundError:
+        return None
+
+
+def _map_snapshot(slot):
+    """Record existing maps so a reused slot cannot import an unchanged one."""
+    memory_dir = SIMULATION_DIR / "outputs" / "runs" / _slot_values(slot)["run"] / "memory"
+    snapshot = {}
+    for path in memory_dir.rglob("grid.npz"):
+        if any(part.endswith(".previous") for part in path.relative_to(memory_dir).parts):
+            continue
+        fingerprint = _map_fingerprint(path)
+        if fingerprint is not None:
+            snapshot[path] = fingerprint
+    return snapshot
+
+
 def _save_map(run):
     """Saves a finished DELTA run's map to the account of the user who started it.
 
@@ -489,15 +517,21 @@ def _save_map(run):
         return
 
     memory_dir = SIMULATION_DIR / "outputs" / "runs" / _slot_values(run["slot"])["run"] / "memory"
+    session_id = None
     try:
-        session_id = save_finished_run(run["user_id"], memory_dir, run["started_at"], _now())
+        before = run.get("map_before")
+        selected = _map_file(run["slot"])
+        if before is None or _map_fingerprint(selected) != before.get(selected):
+            session_id = save_finished_run(run["user_id"], memory_dir, run["started_at"], _now())
     except Exception as error:
-        message = f"[website] Could not save the map to your account: {error}"
+        reason = " ".join(str(error).splitlines()) or type(error).__name__
+        message = f"[website] Could not save the map to your account: {reason}"
     else:
         message = (f"[website] Map saved to your account as scan {session_id}."
                    if session_id else "[website] No new map to save.")
 
     with _lock:
+        run["saved_scan_id"] = session_id
         run["lines"].append(message)
         run["line_count"] += 1
 
@@ -523,7 +557,12 @@ def _read_output(run):
 
     # The window is gone, so the screen it was on can go too
     if run["screen"]:
-        run["screen"].stop()
+        try:
+            run["screen"].stop()
+        except Exception as error:
+            with _lock:
+                run["lines"].append(f"[website] Could not close the viewer: {error}")
+                run["line_count"] += 1
 
     results = _read_results(run) if code == 0 else None
 
@@ -624,6 +663,7 @@ def _summary(run, since=0):
         "lines": lines[start:],
         "line_count": run["line_count"],
         "slot": run["slot"],
+        "saved_scan_id": run.get("saved_scan_id"),
         # Where the browser can watch it, while it runs (None = not in the browser)
         "viewer": run["viewer"] if run["status"] in ("running", "stopping") else None,
         # The physics twin's numbers, once its flight has finished
@@ -778,6 +818,8 @@ def start_simulation(sim_id: str, request: Request, where: str = "browser"):
             "slot": slot,
             "viewer": None,
             "results": None,
+            "saved_scan_id": None,
+            "map_before": _map_snapshot(slot) if sim_id == "delta" else None,
             # who started it, noted now: they may be logged out by the time it ends
             "user_id": user_for_session(owner) if user_for_session else None,
         }

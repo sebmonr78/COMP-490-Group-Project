@@ -473,7 +473,7 @@
     }
 
     // Lists this user's scans in the picker and shows one of them
-    async function loadChanges() {
+    async function loadChanges(preferredScan = null) {
       const message = document.getElementById("changes-message");
       const picker = document.getElementById("scan-picker");
 
@@ -508,7 +508,8 @@
 
         // Start on the newest scan that has changes (a scan saved from a live run
         // has none yet), or just the newest if none do
-        const first = scans.find(scan => scan.change_count > 0) || scans[0];
+        const first = scans.find(scan => scan.session_id === preferredScan) ||
+          scans.find(scan => scan.change_count > 0) || scans[0];
         picker.value = first.session_id;
         await showScan(first);
       } catch (error) {
@@ -579,6 +580,7 @@
     let linesShown = 0;      // how many output lines are already on screen
     let shownRun = null;     // which run they belong to (its number)
     let pollTimer = null;
+    let refreshedScanForRun = null;
 
     /**
      * Builds the Simulations table from GET /api/simulations: one row per
@@ -776,6 +778,9 @@
 
         if (run.status === "starting" || run.status === "running" || run.status === "stopping") {
           pollTimer = setTimeout(pollRun, 1000);
+        } else if (run.saved_scan_id && refreshedScanForRun !== run.number) {
+          refreshedScanForRun = run.number;
+          await Promise.all([loadDrones(), loadChanges(run.saved_scan_id)]);
         }
       } catch (error) {
         document.getElementById("sim-message").textContent = "Lost contact with the server: " + error.message;

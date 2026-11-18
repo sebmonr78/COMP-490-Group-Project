@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Python: module virtual_screen</title>
+<link rel="stylesheet" type="text/css" href="_pydoc.css">
+</head><body>
+
+<table class="heading">
+<tr class="heading-text decor">
+<td class="title">&nbsp;<br><strong class="title">virtual_screen</strong></td>
+<td class="extra"><a href=".">index</a><br><a href="../../app/virtual_screen.py">app/virtual_screen.py</a></td></tr></table>
+    <p><span class="code">Virtual&nbsp;Screen:&nbsp;an&nbsp;invisible&nbsp;screen&nbsp;on&nbsp;the&nbsp;server&nbsp;that&nbsp;a&nbsp;browser&nbsp;can&nbsp;watch&nbsp;and&nbsp;control.<br>
+&nbsp;<br>
+Module&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;virtual_screen.py&nbsp;&nbsp;&nbsp;(Design:&nbsp;Virtual&nbsp;Screen)<br>
+Class&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;<a href="#VirtualScreen">VirtualScreen</a><br>
+Date&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;:&nbsp;Created&nbsp;2026-10-21,&nbsp;last&nbsp;updated&nbsp;2026-10-26<br>
+Programmer&nbsp;&nbsp;:&nbsp;Sebastian<br>
+&nbsp;<br>
+DESCRIPTION<br>
+&nbsp;&nbsp;&nbsp;&nbsp;When&nbsp;a&nbsp;simulation&nbsp;runs&nbsp;"in&nbsp;the&nbsp;browser",&nbsp;its&nbsp;window&nbsp;must&nbsp;not&nbsp;open&nbsp;on&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;server's&nbsp;own&nbsp;monitor.&nbsp;Instead&nbsp;it&nbsp;opens&nbsp;on&nbsp;a&nbsp;screen&nbsp;that&nbsp;only&nbsp;exists&nbsp;in<br>
+&nbsp;&nbsp;&nbsp;&nbsp;memory,&nbsp;and&nbsp;the&nbsp;browser&nbsp;watches&nbsp;and&nbsp;controls&nbsp;it:<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Xvfb&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;the&nbsp;invisible&nbsp;screen&nbsp;(a&nbsp;display&nbsp;such&nbsp;as&nbsp;:99)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;x11vnc&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;shares&nbsp;that&nbsp;screen&nbsp;over&nbsp;VNC,&nbsp;on&nbsp;this&nbsp;machine&nbsp;only<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;websockify&nbsp;&nbsp;serves&nbsp;noVNC,&nbsp;the&nbsp;in-browser&nbsp;VNC&nbsp;viewer,&nbsp;and&nbsp;carries&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;VNC&nbsp;traffic&nbsp;over&nbsp;a&nbsp;WebSocket;&nbsp;this&nbsp;is&nbsp;the&nbsp;browser's&nbsp;port<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;The&nbsp;simulation&nbsp;still&nbsp;renders&nbsp;with&nbsp;the&nbsp;GPU;&nbsp;the&nbsp;screen&nbsp;only&nbsp;receives&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;finished&nbsp;pictures.&nbsp;Each&nbsp;run&nbsp;gets&nbsp;its&nbsp;own&nbsp;screen,&nbsp;VNC&nbsp;password&nbsp;and&nbsp;viewer<br>
+&nbsp;&nbsp;&nbsp;&nbsp;port,&nbsp;so&nbsp;several&nbsp;people&nbsp;can&nbsp;each&nbsp;have&nbsp;their&nbsp;own&nbsp;window&nbsp;at&nbsp;once.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Needs&nbsp;on&nbsp;the&nbsp;server:&nbsp;sudo&nbsp;apt&nbsp;install&nbsp;xvfb&nbsp;x11vnc&nbsp;novnc&nbsp;websockify<br>
+&nbsp;<br>
+IMPORTANT&nbsp;FUNCTIONS<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#VirtualScreen">VirtualScreen</a>(port)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;In&nbsp;:&nbsp;the&nbsp;viewer&nbsp;port&nbsp;the&nbsp;browser&nbsp;will&nbsp;connect&nbsp;to&nbsp;(6080,&nbsp;6081,&nbsp;...).<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Out:&nbsp;a&nbsp;screen&nbsp;<a href="builtins.html#object">object</a>,&nbsp;not&nbsp;started&nbsp;yet;&nbsp;.password&nbsp;is&nbsp;set.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#VirtualScreen">VirtualScreen</a>.start()&nbsp;-&gt;&nbsp;None<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Starts&nbsp;Xvfb,&nbsp;x11vnc&nbsp;and&nbsp;websockify.&nbsp;Raises&nbsp;RuntimeError&nbsp;(with&nbsp;the<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;reason)&nbsp;if&nbsp;a&nbsp;program&nbsp;is&nbsp;missing,&nbsp;the&nbsp;port&nbsp;is&nbsp;taken&nbsp;or&nbsp;one&nbsp;fails.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#VirtualScreen">VirtualScreen</a>.environment(env)&nbsp;-&gt;&nbsp;dict<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;In&nbsp;:&nbsp;environment&nbsp;variables.&nbsp;Out:&nbsp;a&nbsp;copy&nbsp;that&nbsp;opens&nbsp;windows&nbsp;on&nbsp;this<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;screen&nbsp;(DISPLAY,&nbsp;SDL_VIDEODRIVER=x11,&nbsp;Wayland&nbsp;variables&nbsp;removed).<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#VirtualScreen">VirtualScreen</a>.stop()&nbsp;-&gt;&nbsp;None<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Stops&nbsp;the&nbsp;three&nbsp;programs&nbsp;and&nbsp;deletes&nbsp;the&nbsp;screen's&nbsp;temporary&nbsp;files.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#-missing_requirements">missing_requirements</a>()&nbsp;-&gt;&nbsp;list[str]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Out:&nbsp;names&nbsp;of&nbsp;the&nbsp;programs&nbsp;not&nbsp;installed;&nbsp;empty&nbsp;means&nbsp;ready.<br>
+&nbsp;<br>
+IMPORTANT&nbsp;DATA&nbsp;STRUCTURES<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#VirtualScreen">VirtualScreen</a>.processes&nbsp;:&nbsp;list[subprocess.Popen]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The&nbsp;helper&nbsp;programs,&nbsp;in&nbsp;the&nbsp;order&nbsp;they&nbsp;were&nbsp;started.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#VirtualScreen">VirtualScreen</a>.log_dir&nbsp;:&nbsp;Path<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;A&nbsp;temporary&nbsp;folder&nbsp;with&nbsp;each&nbsp;helper's&nbsp;log,&nbsp;the&nbsp;VNC&nbsp;password&nbsp;file<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(deleted&nbsp;by&nbsp;x11vnc&nbsp;once&nbsp;read)&nbsp;and&nbsp;the&nbsp;file&nbsp;x11vnc&nbsp;writes&nbsp;its&nbsp;port&nbsp;to.<br>
+&nbsp;<br>
+ALGORITHMS<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Display&nbsp;number:&nbsp;linear&nbsp;search&nbsp;from&nbsp;:99&nbsp;upward&nbsp;for&nbsp;the&nbsp;first&nbsp;number&nbsp;with<br>
+&nbsp;&nbsp;&nbsp;&nbsp;no&nbsp;X&nbsp;lock&nbsp;file&nbsp;or&nbsp;socket,&nbsp;done&nbsp;under&nbsp;a&nbsp;lock&nbsp;so&nbsp;two&nbsp;screens&nbsp;starting&nbsp;at<br>
+&nbsp;&nbsp;&nbsp;&nbsp;the&nbsp;same&nbsp;moment&nbsp;cannot&nbsp;take&nbsp;the&nbsp;same&nbsp;one.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;VNC&nbsp;port:&nbsp;x11vnc&nbsp;picks&nbsp;a&nbsp;free&nbsp;port&nbsp;itself&nbsp;(-autoport)&nbsp;and&nbsp;reports&nbsp;it<br>
+&nbsp;&nbsp;&nbsp;&nbsp;through&nbsp;a&nbsp;file&nbsp;(-flag),&nbsp;which&nbsp;is&nbsp;then&nbsp;read&nbsp;back.&nbsp;Chosen&nbsp;over&nbsp;finding&nbsp;a<br>
+&nbsp;&nbsp;&nbsp;&nbsp;free&nbsp;port&nbsp;first&nbsp;and&nbsp;handing&nbsp;it&nbsp;to&nbsp;x11vnc,&nbsp;because&nbsp;another&nbsp;program&nbsp;could<br>
+&nbsp;&nbsp;&nbsp;&nbsp;take&nbsp;that&nbsp;port&nbsp;in&nbsp;between.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Access&nbsp;control:&nbsp;an&nbsp;8-character&nbsp;random&nbsp;password&nbsp;per&nbsp;screen&nbsp;(secrets<br>
+&nbsp;&nbsp;&nbsp;&nbsp;module;&nbsp;VNC&nbsp;uses&nbsp;at&nbsp;most&nbsp;8&nbsp;characters),&nbsp;given&nbsp;only&nbsp;to&nbsp;the&nbsp;session&nbsp;that<br>
+&nbsp;&nbsp;&nbsp;&nbsp;started&nbsp;the&nbsp;run,&nbsp;so&nbsp;nobody&nbsp;can&nbsp;open&nbsp;another&nbsp;person's&nbsp;window.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Shutdown&nbsp;in&nbsp;reverse&nbsp;start&nbsp;order&nbsp;(viewer,&nbsp;VNC,&nbsp;screen),&nbsp;so&nbsp;nothing&nbsp;is&nbsp;left<br>
+&nbsp;&nbsp;&nbsp;&nbsp;attached&nbsp;to&nbsp;a&nbsp;screen&nbsp;that&nbsp;is&nbsp;already&nbsp;gone.<br>
+&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Why&nbsp;this&nbsp;approach:&nbsp;Xvfb&nbsp;+&nbsp;x11vnc&nbsp;+&nbsp;noVNC&nbsp;lets&nbsp;an&nbsp;unchanged&nbsp;desktop<br>
+&nbsp;&nbsp;&nbsp;&nbsp;program&nbsp;appear&nbsp;in&nbsp;any&nbsp;browser&nbsp;with&nbsp;nothing&nbsp;to&nbsp;install&nbsp;on&nbsp;the&nbsp;client.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Remote-desktop&nbsp;software&nbsp;would&nbsp;need&nbsp;an&nbsp;install&nbsp;on&nbsp;every&nbsp;client,&nbsp;and<br>
+&nbsp;&nbsp;&nbsp;&nbsp;rewriting&nbsp;the&nbsp;simulation&nbsp;to&nbsp;draw&nbsp;in&nbsp;the&nbsp;browser&nbsp;would&nbsp;mean&nbsp;a&nbsp;new&nbsp;renderer.<br>
+&nbsp;<br>
+SETTINGS&nbsp;(environment&nbsp;variables,&nbsp;all&nbsp;optional)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;DELTA_VIEWER_PORT&nbsp;&nbsp;&nbsp;first&nbsp;viewer&nbsp;port&nbsp;&nbsp;&nbsp;(default&nbsp;6080)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;DELTA_NOVNC_DIR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;where&nbsp;noVNC's&nbsp;files&nbsp;are&nbsp;&nbsp;&nbsp;(default&nbsp;/usr/share/novnc)</span></p>
+<p>
+<table class="section">
+<tr class="decor pkg-content-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Modules</strong></td></tr>
+    
+<tr><td class="decor pkg-content-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><table><tr><td class="multicolumn">os<br>
+secrets<br>
+shutil<br>
+</td><td class="multicolumn">signal<br>
+socket<br>
+subprocess<br>
+</td><td class="multicolumn">tempfile<br>
+threading<br>
+time<br>
+</td><td class="multicolumn"></td></tr></table></td></tr></table><p>
+<table class="section">
+<tr class="decor index-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Classes</strong></td></tr>
+    
+<tr><td class="decor index-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><dl>
+<dt class="heading-text"><a href="builtins.html#object">builtins.object</a>
+</dt><dd>
+<dl>
+<dt class="heading-text"><a href="virtual_screen.html#VirtualScreen">VirtualScreen</a>
+</dt></dl>
+</dd>
+</dl>
+ <p>
+<table class="section">
+<tr class="decor title-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><a name="VirtualScreen">class <strong>VirtualScreen</strong></a>(<a href="builtins.html#object">builtins.object</a>)</td></tr>
+    
+<tr><td class="decor title-decor" rowspan=2><span class="code">&nbsp;&nbsp;&nbsp;</span></td>
+<td class="decor title-decor" colspan=2><span class="code"><a href="#VirtualScreen">VirtualScreen</a>(port)<br>
+&nbsp;<br>
+One&nbsp;invisible&nbsp;screen,&nbsp;shared&nbsp;with&nbsp;one&nbsp;browser&nbsp;through&nbsp;its&nbsp;own&nbsp;port.<br>
+&nbsp;<br>
+Attributes:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;port&nbsp;(int):&nbsp;the&nbsp;viewer&nbsp;port&nbsp;the&nbsp;browser&nbsp;connects&nbsp;to.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;password&nbsp;(str):&nbsp;random&nbsp;8-character&nbsp;VNC&nbsp;password&nbsp;for&nbsp;this&nbsp;screen.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;display&nbsp;(str&nbsp;|&nbsp;None):&nbsp;the&nbsp;X&nbsp;display,&nbsp;e.g.&nbsp;":99",&nbsp;once&nbsp;started.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;processes&nbsp;(list[subprocess.Popen]):&nbsp;the&nbsp;helpers,&nbsp;in&nbsp;start&nbsp;order.<br>
+&nbsp;&nbsp;&nbsp;&nbsp;log_dir&nbsp;(Path):&nbsp;temporary&nbsp;folder&nbsp;for&nbsp;the&nbsp;helpers'&nbsp;logs&nbsp;and&nbsp;files.<br>&nbsp;</span></td></tr>
+<tr><td>&nbsp;</td>
+<td class="singlecolumn">Methods defined here:<br>
+<dl><dt><a name="VirtualScreen-__init__"><strong>__init__</strong></a>(self, port)</dt><dd><span class="code">Prepares&nbsp;a&nbsp;screen&nbsp;for&nbsp;the&nbsp;given&nbsp;viewer&nbsp;port;&nbsp;<a href="#VirtualScreen-start">start</a>()&nbsp;starts&nbsp;it.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;port&nbsp;(int):&nbsp;the&nbsp;viewer&nbsp;port&nbsp;the&nbsp;browser&nbsp;will&nbsp;connect&nbsp;to.</span></dd></dl>
+
+<dl><dt><a name="VirtualScreen-environment"><strong>environment</strong></a>(self, env)</dt><dd><span class="code">Environment&nbsp;for&nbsp;the&nbsp;simulation,&nbsp;so&nbsp;its&nbsp;window&nbsp;opens&nbsp;on&nbsp;this&nbsp;screen.<br>
+&nbsp;<br>
+Args:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;env&nbsp;(dict[str,&nbsp;str]):&nbsp;the&nbsp;simulation's&nbsp;environment&nbsp;variables.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;dict[str,&nbsp;str]:&nbsp;a&nbsp;copy&nbsp;with&nbsp;DISPLAY&nbsp;set&nbsp;to&nbsp;this&nbsp;screen,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;SDL_VIDEODRIVER=x11&nbsp;for&nbsp;pygame,&nbsp;and&nbsp;the&nbsp;Wayland&nbsp;variables&nbsp;removed.</span></dd></dl>
+
+<dl><dt><a name="VirtualScreen-start"><strong>start</strong></a>(self)</dt><dd><span class="code">Starts&nbsp;Xvfb,&nbsp;x11vnc&nbsp;and&nbsp;websockify,&nbsp;in&nbsp;that&nbsp;order.<br>
+&nbsp;<br>
+Raises:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;RuntimeError:&nbsp;a&nbsp;program&nbsp;is&nbsp;missing,&nbsp;the&nbsp;viewer&nbsp;port&nbsp;is&nbsp;in&nbsp;use,&nbsp;or<br>
+&nbsp;&nbsp;&nbsp;&nbsp;a&nbsp;program&nbsp;failed&nbsp;to&nbsp;start&nbsp;(the&nbsp;message&nbsp;includes&nbsp;its&nbsp;last&nbsp;output).<br>
+&nbsp;&nbsp;&nbsp;&nbsp;Whatever&nbsp;had&nbsp;already&nbsp;started&nbsp;is&nbsp;stopped&nbsp;first.</span></dd></dl>
+
+<dl><dt><a name="VirtualScreen-stop"><strong>stop</strong></a>(self)</dt><dd><span class="code">Stops&nbsp;the&nbsp;helpers&nbsp;in&nbsp;reverse&nbsp;start&nbsp;order&nbsp;and&nbsp;deletes&nbsp;log_dir.<br>
+&nbsp;<br>
+Each&nbsp;gets&nbsp;SIGTERM&nbsp;and&nbsp;3&nbsp;seconds,&nbsp;then&nbsp;SIGKILL.&nbsp;Safe&nbsp;to&nbsp;call&nbsp;twice.</span></dd></dl>
+
+<hr>
+Data descriptors defined here:<br>
+<dl><dt><strong>__dict__</strong></dt>
+<dd><span class="code">dictionary&nbsp;for&nbsp;instance&nbsp;variables</span></dd>
+</dl>
+<dl><dt><strong>__weakref__</strong></dt>
+<dd><span class="code">list&nbsp;of&nbsp;weak&nbsp;references&nbsp;to&nbsp;the&nbsp;object</span></dd>
+</dl>
+</td></tr></table></td></tr></table><p>
+<table class="section">
+<tr class="decor functions-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Functions</strong></td></tr>
+    
+<tr><td class="decor functions-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><dl><dt><a name="-first_viewer_port"><strong>first_viewer_port</strong></a>()</dt><dd><span class="code">The&nbsp;viewer&nbsp;port&nbsp;of&nbsp;slot&nbsp;1&nbsp;(DELTA_VIEWER_PORT,&nbsp;default&nbsp;6080);&nbsp;slot&nbsp;n&nbsp;uses&nbsp;this&nbsp;+&nbsp;n&nbsp;-&nbsp;1.</span></dd></dl>
+ <dl><dt><a name="-missing_requirements"><strong>missing_requirements</strong></a>()</dt><dd><span class="code">What&nbsp;the&nbsp;in-browser&nbsp;view&nbsp;needs&nbsp;but&nbsp;is&nbsp;not&nbsp;installed.<br>
+&nbsp;<br>
+Returns:<br>
+&nbsp;&nbsp;&nbsp;&nbsp;list[str]:&nbsp;missing&nbsp;program&nbsp;names&nbsp;("Xvfb",&nbsp;"x11vnc",&nbsp;"websockify",<br>
+&nbsp;&nbsp;&nbsp;&nbsp;"novnc");&nbsp;empty&nbsp;means&nbsp;ready.</span></dd></dl>
+ <dl><dt><a name="-novnc_dir"><strong>novnc_dir</strong></a>()</dt><dd><span class="code">The&nbsp;folder&nbsp;holding&nbsp;noVNC's&nbsp;web&nbsp;files&nbsp;(DELTA_NOVNC_DIR,&nbsp;default&nbsp;/usr/share/novnc).</span></dd></dl>
+</td></tr></table><p>
+<table class="section">
+<tr class="decor data-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Data</strong></td></tr>
+    
+<tr><td class="decor data-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><strong>INSTALL_HINT</strong> = 'On the server run: sudo apt install xvfb x11vnc novnc websockify'<br>
+<strong>REQUIRED_PROGRAMS</strong> = ['Xvfb', 'x11vnc', 'websockify']<br>
+<strong>SCREEN_SIZE</strong> = '1600x800x24'</td></tr></table>
+</body></html>

@@ -17,6 +17,10 @@ import db
 import import_run
 import mailer
 import passwords
+import server_environment
+
+server_environment.configure()
+
 import simulations
 
 @asynccontextmanager
@@ -115,6 +119,8 @@ simulations.SESSION_COOKIE = SESSION_COOKIE
 # save a finished DELTA run's map to that person's account (database/import_run.py)
 simulations.user_for_session = lambda token: SESSIONS.get(token, (None,))[0]
 simulations.save_finished_run = import_run.import_run
+# Freshness checks and saving must select the same map folder.
+simulations.find_map_folder = import_run.find_map_folder
 app.include_router(simulations.router, dependencies=[Depends(require_login)])
 
 @app.get("/")

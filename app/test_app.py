@@ -637,8 +637,111 @@ class DeltaMapsAreSaved(AppTest):
         self.assertEqual(run["status"], "stopped")
         self.assertIn("[website] Could not save the map to your account: boom", run["lines"])
 
+    def test_save_confirmation_is_the_final_output_line_and_names_the_scan(self):
+        run = self.run_and_stop(self.browser())
+        self.assertEqual(run["lines"][-1],
+                         f"[website] Map saved to your account as scan {run['saved_scan_id']}.")
+        self.assertIsInstance(run["saved_scan_id"], int)
+
+    def test_recent_unchanged_map_from_previous_run_is_not_imported(self):
+        memory = self.sim_dir / "outputs/runs/web-1/memory"
+        fake_memory_folder(memory)
+        recent = memory / "grid.npz"
+        run = {"id": "delta", "slot": 1, "user_id": 1, "started_at": db.now(),
+               "map_before": simulations._map_snapshot(1), "lines": [], "line_count": 0}
+        with mock.patch.object(simulations, "save_finished_run") as save:
+            simulations._save_map(run)
+        save.assert_not_called()
+        self.assertEqual(run["lines"], ["[website] No new map to save."])
+        self.assertIsNone(run["saved_scan_id"])
+
+    def test_recent_unchanged_map_in_nested_scene_folder_is_not_imported(self):
+        memory = self.sim_dir / "outputs/runs/web-1/memory"
+        fake_memory_folder(memory / "102816036/rtabmap")
+        run = {"id": "delta", "slot": 1, "user_id": 1, "started_at": db.now(),
+               "map_before": simulations._map_snapshot(1), "lines": [], "line_count": 0}
+        with mock.patch.object(simulations, "save_finished_run") as save:
+            simulations._save_map(run)
+        save.assert_not_called()
+        self.assertEqual(run["lines"], ["[website] No new map to save."])
+
+    def test_removing_one_old_map_does_not_import_another_unchanged_map(self):
+        memory = self.sim_dir / "outputs/runs/web-1/memory"
+        old = memory / "111/rtabmap"
+        fake_memory_folder(old)
+        fake_memory_folder(memory / "222/rtabmap")
+        run = {"id": "delta", "slot": 1, "user_id": 1, "started_at": db.now(),
+               "map_before": simulations._map_snapshot(1), "lines": [], "line_count": 0}
+        shutil.rmtree(old)
+        with mock.patch.object(simulations, "save_finished_run") as save:
+            simulations._save_map(run)
+        save.assert_not_called()
+        self.assertEqual(run["lines"], ["[website] No new map to save."])
+
+    def test_updated_nested_map_is_imported_and_previous_map_is_ignored(self):
+        memory = self.sim_dir / "outputs/runs/web-1/memory"
+        folder = memory / "102816036/rtabmap"
+        fake_memory_folder(folder)
+        before = simulations._map_snapshot(1)
+        folder.rename(folder.with_name("rtabmap.previous"))
+        fake_memory_folder(folder)
+        run = {"id": "delta", "slot": 1, "user_id": 1, "started_at": db.now(),
+               "map_before": before, "lines": [], "line_count": 0}
+        simulations._save_map(run)
+        self.assertIsInstance(run["saved_scan_id"], int)
+        self.assertEqual(run["lines"], [f"[website] Map saved to your account as scan {run['saved_scan_id']}."])
+
+    def test_slot_remains_busy_until_map_import_and_final_message_are_complete(self):
+        import threading
+
+        client = self.browser()
+        entered, release = threading.Event(), threading.Event()
+        original = simulations.save_finished_run
+
+        def delayed(*args):
+            entered.set()
+            self.assertTrue(release.wait(timeout=10))
+            return original(*args)
+
+        with mock.patch.object(simulations, "save_finished_run", side_effect=delayed):
+            try:
+                client.post("/api/simulations/delta/start")
+                self.wait_for(client, "running")
+                client.post("/api/simulations/stop")
+                self.assertTrue(entered.wait(timeout=10))
+                run = client.get("/api/simulations/run").json()["run"]
+                self.assertEqual(run["status"], "stopping")
+                self.assertEqual(run["server_running"], 1)
+                self.assertIsNone(run["saved_scan_id"])
+                self.assertEqual(client.post("/api/simulations/delta/start").status_code, 409)
+            finally:
+                release.set()
+            run = self.wait_for(client, "stopped")
+        self.assertEqual(run["server_running"], 0)
+        self.assertTrue(run["lines"][-1].startswith("[website] Map saved to your account as scan "))
+
+    def test_save_error_is_a_single_final_line(self):
+        with mock.patch.object(simulations, "save_finished_run", side_effect=RuntimeError("database busy\ntry again")):
+            run = self.run_and_stop(self.browser())
+        self.assertEqual(run["lines"][-1], "[website] Could not save the map to your account: database busy try again")
+        self.assertIsNone(run["saved_scan_id"])
+
+    def test_viewer_cleanup_failure_does_not_lose_the_map(self):
+        screen = mock.Mock()
+        screen.stop.side_effect = RuntimeError("viewer exited")
+        run = {"id": "delta", "process": mock.Mock(), "screen": screen, "slot": 1,
+               "user_id": 1, "started_at": db.now(), "status": "stopping",
+               "lines": [], "line_count": 0}
+        run["process"].stdout = StringIO("DELTA finished\n")
+        run["process"].wait.return_value = 0
+        with mock.patch.object(simulations, "save_finished_run", return_value=3):
+            simulations._read_output(run)
+        self.assertEqual(run["status"], "stopped")
+        self.assertEqual(run["lines"][-1], "[website] Map saved to your account as scan 3.")
+
     def test_the_website_hands_simulations_what_it_needs(self):
         self.assertIs(simulations.save_finished_run, import_run.import_run)
+        self.assertIs(simulations.find_map_folder, import_run.find_map_folder)
         self.assertIsNone(simulations.user_for_session("no-such-ticket"))
         user_id = login(self.client, **DEMO).json()["user_id"]
         token = self.client.cookies.get(main.SESSION_COOKIE)
