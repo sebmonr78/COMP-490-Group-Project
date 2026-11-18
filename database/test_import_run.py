@@ -438,6 +438,82 @@ class ComparingMaps(unittest.TestCase):
     def test_the_seed_scans_without_a_map_file_do_not_count(self):
         self.assertEqual(self.changes(self.save(self.base)), [])         # the demo user has seed scans already
 
+    def forget_the_changes(self):
+        """Back to how scans saved before comparing existed look: no changes at all."""
+        self.conn.execute("DELETE FROM ChangeRecord WHERE object_id IS NULL")
+        self.conn.commit()
+
+    def compare_all(self, **options):
+        return import_run.compare_saved_scans(conn=self.conn, saved_dir=self.saved, **options)
+
+    def test_older_scans_can_be_compared_afterwards(self):
+        box = with_block(self.base, range(15, 19), range(25, 29))
+        first, second, third = self.save(self.base), self.save(box), self.save(self.base)
+        self.forget_the_changes()
+
+        self.assertEqual(self.compare_all(), (2, 2))               # scans 2 and 3; the first is the baseline
+        (appeared,), (gone,) = self.changes(second), self.changes(third)
+        self.assertEqual((appeared["change_type"], appeared["previous_session_id"]), ("appeared", first))
+        self.assertEqual((gone["change_type"], gone["previous_session_id"]), ("disappeared", second))
+        self.assertEqual(self.changes(first), [])
+
+    def test_comparing_again_does_not_add_the_same_changes_twice(self):
+        self.save(self.base)
+        self.save(with_block(self.base, range(15, 19), range(25, 29)))
+        self.forget_the_changes()
+        self.compare_all()
+        before = self.conn.execute("SELECT COUNT(*) FROM ChangeRecord").fetchone()[0]
+        self.assertEqual(self.compare_all(), (0, 0))
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM ChangeRecord").fetchone()[0], before)
+
+    def test_redo_works_the_changes_out_again_and_keeps_the_demo_data(self):
+        self.save(self.base)
+        second = self.save(with_block(self.base, range(15, 19), range(25, 29)))
+        thing = seed._add_object(self.conn, second, "chair", 1.0, 0.0, 1.0, 0.9, db.now(), db.now())
+        self.conn.execute(
+            "INSERT INTO ChangeRecord (object_id, previous_session_id, current_session_id, change_type, "
+            "detected_at) VALUES (?, 1, ?, 'moved', ?)", (thing, second, db.now()))      # a change tied to an object
+        self.conn.commit()
+        demo = self.conn.execute("SELECT COUNT(*) FROM ChangeRecord WHERE object_id IS NOT NULL").fetchone()[0]
+        from_maps = lambda: [c for c in self.changes(second) if c["object_id"] is None]
+        old = import_run.MIN_CHANGE_CELLS
+        import_run.MIN_CHANGE_CELLS = 100                          # now a 4 x 4 box is too small
+        try:
+            self.assertEqual(self.compare_all(), (0, 0))           # it already has its change: skipped
+            self.assertEqual(len(from_maps()), 1)
+            self.assertEqual(self.compare_all(redo=True), (1, 0))
+            self.assertEqual(from_maps(), [])
+        finally:
+            import_run.MIN_CHANGE_CELLS = old
+        self.assertEqual(self.compare_all(redo=True), (1, 1))      # and back with the old size
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM ChangeRecord WHERE object_id IS NOT NULL").fetchone()[0], demo)
+
+    def test_a_broken_map_does_not_stop_the_backfill(self):
+        first = self.save(self.base)
+        second = self.save(with_block(self.base, range(15, 19), range(25, 29)))
+        third = self.save(with_block(self.base, range(15, 19), range(25, 29)))
+        self.forget_the_changes()
+        (self.saved / f"session-{first}" / "grid.npz").write_bytes(b"not a zip")
+        self.assertEqual(self.compare_all(), (2, 0))               # the 1-2 pair fails, 2-3 has no change
+        self.assertEqual((self.changes(second), self.changes(third)), ([], []))
+
+    def test_each_user_is_compared_only_with_their_own_scans(self):
+        self.save(self.base)
+        other = self.conn.execute(
+            "INSERT INTO User (username, email, password_hash) VALUES ('b', 'b@example.com', 'x')").lastrowid
+        self.conn.commit()
+        theirs = self.save(with_block(self.base, range(15, 19), range(25, 29)), user_id=other)
+        self.forget_the_changes()
+        self.assertEqual(self.compare_all(), (0, 0))               # each is the first of their own
+        self.assertEqual(self.changes(theirs), [])
+
+    def test_scans_from_a_different_start_are_counted_but_get_no_changes(self):
+        self.save(self.base)
+        shifted = self.save(with_block(self.base, range(15, 19), range(25, 29)), origin=(-3.0, -7.5))
+        self.assertEqual(self.compare_all(redo=True), (1, 0))
+        self.assertEqual(self.changes(shifted), [])
+
     def test_cells_that_touch_corner_to_corner_are_one_region(self):
         regions = import_run.clusters({(0, 0), (1, 1), (5, 5)})
         self.assertEqual(sorted(len(r) for r in regions), [1, 2])

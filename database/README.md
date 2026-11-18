@@ -28,7 +28,7 @@ If you mess up the database and want a fresh one, run `python3 create_db.py --re
 - `create_db.py` - builds `delta.db` from `schema.sql`
 - `seed.py` - the fake sample data
 - `passwords.py` - hashing and checking login passwords (PBKDF2, built into Python)
-- `import_run.py` - saves a finished DELTA run as a new scan: a session, its files, the map's info, a picture of the map, and what changed since your previous scan. Standard library only. The copied files go in `saved_runs/` (not in git)
+- `import_run.py` - saves a finished DELTA run as a new scan: a session, its files, the map's info, a picture of the map, and what changed since your previous scan. Standard library only. The copied files go in `saved_runs/` (not in git). Scans saved before the comparing existed can be compared afterwards with `python import_run.py compare` (add `--redo` to work them all out again, for example after changing the sizes at the top of the file). Run it from the `database` folder
 - `test_db.py` - the tests
 - `test_import_run.py` - the tests for `import_run.py`
 

@@ -37,6 +37,12 @@ resolution, size and origin (the origin is where the drone started), because
 otherwise every wall would look like a change. Like the picture, this is best
 effort: if comparing fails, the scan is still saved, just without changes.
 
+Scans saved before this existed were never compared. compare_saved_scans() does
+that for all of them in one go (and again, with redo=True, after the sizes
+below are changed):
+
+    python import_run.py compare [--redo]
+
 Everything is read with the standard library, so the app needs no numpy or
 Pillow. An .npz is a zip of .npy files, and a PNG is a few small chunks.
 
@@ -407,6 +413,18 @@ def previous_saved_scan(conn, user_id, session_id, saved_dir):
     return None
 
 
+def add_changes(conn, previous_id, session_id, changes):
+    """Saves changes found by find_changes() as ChangeRecord rows (not tied to an object)."""
+    for change in changes:
+        conn.execute(
+            "INSERT INTO ChangeRecord (object_id, previous_session_id, current_session_id, "
+            "change_type, x, y, z, description, detected_at) "
+            "VALUES (NULL, ?, ?, ?, ?, ?, NULL, ?, ?)",
+            (previous_id, session_id, change["change_type"], change["x"], change["y"],
+             describe_change(change), db.now()),
+        )
+
+
 def find_or_make_drone(conn, user_id):
     """The drone a run is saved under: the user's own, or a new simulated one.
 
@@ -524,14 +542,8 @@ def import_run(user_id, memory_dir, started_at, ended_at, conn=None, saved_dir=N
                     changes = find_changes(earlier[1], grid) or []
                 except Exception:
                     changes = []    # a map is worth saving even if it can't be compared
-            for change in changes:
-                conn.execute(
-                    "INSERT INTO ChangeRecord (object_id, previous_session_id, current_session_id, "
-                    "change_type, x, y, z, description, detected_at) "
-                    "VALUES (NULL, ?, ?, ?, ?, ?, NULL, ?, ?)",
-                    (earlier[0], session_id, change["change_type"], change["x"], change["y"],
-                     describe_change(change), db.now()),
-                )
+            if earlier:
+                add_changes(conn, earlier[0], session_id, changes)
         return session_id
     except Exception:
         if destination is not None:
@@ -540,3 +552,67 @@ def import_run(user_id, memory_dir, started_at, ended_at, conn=None, saved_dir=N
     finally:
         if own_connection:
             conn.close()
+
+
+def compare_saved_scans(conn=None, saved_dir=None, redo=False):
+    """Compares every user's saved scans with the scan before them, oldest first.
+
+    For scans that were saved before comparing existed (or after the sizes at
+    the top were changed). Each user's first scan is the baseline. A scan that
+    already has changes is skipped, unless `redo` is True: then its changes
+    from comparing maps are deleted and worked out again. Changes tied to an
+    object (the demo data) are never touched.
+
+    Args:
+        conn: an open connection to use; default opens db.connect() and closes it.
+        saved_dir (Path): where the saved maps are; default saved_runs_dir().
+        redo (bool): work out the changes of every scan again.
+
+    Returns:
+        tuple[int, int]: how many scans were compared and how many changes were saved.
+    """
+    saved_dir = Path(saved_dir) if saved_dir else saved_runs_dir()
+    own_connection = conn is None
+    conn = conn or db.connect()
+    compared = added = 0
+    try:
+        with conn:
+            owners = [row[0] for row in conn.execute(
+                "SELECT DISTINCT owner_id FROM Drone WHERE owner_id IS NOT NULL ORDER BY owner_id")]
+            for owner in owners:
+                earlier = None
+                for row in conn.execute(
+                        "SELECT s.session_id FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
+                        "WHERE d.owner_id = ? ORDER BY s.session_id", (owner,)).fetchall():
+                    grid = saved_dir / f"session-{row['session_id']}" / MAP_FILE
+                    if not grid.is_file():
+                        continue
+                    if earlier is not None:
+                        done = conn.execute(
+                            "SELECT 1 FROM ChangeRecord WHERE current_session_id = ? "
+                            "AND object_id IS NULL", (row["session_id"],)).fetchone()
+                        if redo:
+                            conn.execute("DELETE FROM ChangeRecord WHERE current_session_id = ? "
+                                         "AND object_id IS NULL", (row["session_id"],))
+                        if redo or not done:
+                            try:
+                                changes = find_changes(earlier[1], grid) or []
+                            except Exception:
+                                changes = []
+                            add_changes(conn, earlier[0], row["session_id"], changes)
+                            compared += 1
+                            added += len(changes)
+                    earlier = (row["session_id"], grid)
+        return compared, added
+    finally:
+        if own_connection:
+            conn.close()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["compare"] and set(sys.argv[2:]) <= {"--redo"}:
+        scans, changes = compare_saved_scans(redo="--redo" in sys.argv)
+        print(f"Compared {scans} saved scan(s) with the one before; saved {changes} change(s).")
+    else:
+        print("Usage: python import_run.py compare [--redo]")
+        sys.exit(2)
