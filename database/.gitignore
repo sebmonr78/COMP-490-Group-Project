@@ -8,3 +8,6 @@ delta.db-shm
 # Python's compiled copies of our code. Python remakes them, so don't commit them.
 __pycache__/
 *.pyc
+
+# Maps copied out of simulation runs, one folder per scan. Users' data: don't commit.
+saved_runs/

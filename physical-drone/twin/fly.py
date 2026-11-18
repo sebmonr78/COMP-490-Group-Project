@@ -60,6 +60,9 @@ class Twin:
         self.brain = FlightController(b.mass, b.inertia, b.rotors - b.centre_of_mass, b.spin,
                                       abs(float(m.actuator_gear[0][5])), b.motor_model.max_thrust)
         self.push = np.zeros(3)
+        self.drive = np.zeros(3)       # Rolling: world-frame newtons on the cage (a stand-in for the drive)
+        self.yaw_torque = 0.0          # Rolling: N m about the frame's up axis
+        self.drive_watts = 0.0         # Rolling: electrical power the drive is assumed to draw
         self.steps = 0
         self.thrust_cmd = np.zeros(4)
 
@@ -95,9 +98,9 @@ class Twin:
 
         up = d.xmat[b.frame].reshape(3, 3)[:, 2]
         d.xfrc_applied[:] = 0.0
-        d.xfrc_applied[b.frame, 3:6] = twist * up
+        d.xfrc_applied[b.frame, 3:6] = (twist + self.yaw_torque) * up
         v = d.qvel[0:3]
-        d.xfrc_applied[b.cage, 0:3] = -self.drag * np.linalg.norm(v) * v + self.push
+        d.xfrc_applied[b.cage, 0:3] = -self.drag * np.linalg.norm(v) * v + self.push + self.drive
         if self.perturb is not None:
             mujoco.mjv_applyPerturbForce(m, d, self.perturb)
 
@@ -105,7 +108,7 @@ class Twin:
         self.steps += 1
 
     def watts(self):
-        return sum(motor.watts for motor in self.motors) + self.body.electronics_watts()
+        return sum(motor.watts for motor in self.motors) + self.body.electronics_watts() + self.drive_watts
 
 
 def run(script, film=False, out=None, width=640, height=360):

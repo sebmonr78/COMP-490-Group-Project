@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Python: DELTA code documentation</title>
+<link rel="stylesheet" type="text/css" href="_pydoc.css">
+</head><body>
+
+<table class="heading">
+<tr class="heading-text decor">
+<td class="title">&nbsp;<br><strong class="title">DELTA</strong> &mdash; code documentation</td>
+<td class="extra">&nbsp;</td></tr></table>
+    <p>
+<table class="section">
+<tr class="decor index-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Python modules (Pydoc)</strong></td></tr>
+    
+<tr><td class="decor index-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><dl><dt><a href="simulations.html">simulations</a></dt><dd>Simulation Manager: starts, tracks and stops the simulations (app/simulations.py)</dd><dt><a href="virtual_screen.html">virtual_screen</a></dt><dd>Virtual Screen: the in-browser simulation window (app/virtual_screen.py)</dd><dt><a href="passwords.html">passwords</a></dt><dd>Password Hashing (database/passwords.py)</dd><dt><a href="main.html">main</a></dt><dd>Login, Recovery and Registration endpoints (app/main.py)</dd></dl></td></tr></table><p>
+<table class="section">
+<tr class="decor functions-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Brain Dependency Check <small>(<a href="../../simulation/setup/check_brain.sh">simulation/setup/check_brain.sh</a>)</small></strong></td></tr>
+    
+<tr><td class="decor functions-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><pre>Brain Dependency Check
+
+Script      : setup/check_brain.sh   (Design: Brain setup)
+Date        : Created 2026-10-28
+Programmer  : Sebastian
+
+DESCRIPTION
+  Checks that everything DELTA&#x27;s brain needs is installed, and installs
+  whatever is missing or the wrong version. Safe to run as often as
+  needed: what is already right is left alone. setup_brain.sh builds the
+  env from nothing and stops if it already exists; this script is for an
+  env that exists but may be incomplete or out of date.
+
+  Usage (from simulation/):
+      bash setup/check_brain.sh            check, then install what&#x27;s missing
+      bash setup/check_brain.sh --check    only check and report
+
+  Checks, in order:
+      1. conda                  cannot be installed from here: says how
+      2. the `brain` conda env  Python 3.10, created if missing
+      3. its Python packages    the pinned versions from setup_brain.sh
+      4. that each one imports  a package can be installed and still broken
+      5. the GPU                torch must see CUDA (driver 570+); reported only
+      6. the model files        DA3, YOLOE, the Piper voice
+      7. RTAB-Map               the `rtabmap` env and the compiled bridge,
+                                built by setup/setup_rtabmap.sh if missing
+
+  Exit code: 0 if everything is in place, 1 if anything is still missing.
+
+IMPORTANT FUNCTIONS
+  check_package NAME VERSION PIP_SPEC [needs-torch]
+      In : pip package name, wanted version (&quot;&quot; = any), what to install,
+           and whether it is built on torch.
+      Out: prints ok / missing / wrong; installs PIP_SPEC if needed (not in
+           --check mode); adds failures to PROBLEMS.
+  installed_version NAME     Out: the installed version, or nothing.
+  version_ok WANTED HAVE     True if HAVE matches WANTED, ignoring &quot;+cu128&quot;.
+  env_exists NAME            True if the conda env exists.
+  brain_python / brain_pip   run Python / pip inside the `brain` env.
+  bridge_works               True if the RTAB-Map bridge starts.
+
+IMPORTANT DATA STRUCTURES
+  Pinned versions (TORCH, XFORMERS, DA3_COMMIT, ULTRALYTICS, PIPER, ...):
+      must match setup_brain.sh; change both together.
+  PROBLEMS  (array): everything still not right, printed in the summary.
+  INSTALLED (array): everything this run installed or fixed.
+  TORCH_OK  (0/1):   whether the pinned torch is in place.
+
+ALGORITHMS
+  Check, then fix only what is wrong (idempotent): every item is compared
+  with its pinned version first, so a second run changes nothing. Chosen
+  over reinstalling everything, which would re-download several GB.
+
+  Dependency order: torch is checked and installed first, and packages
+  built against it (xformers, ultralytics, DA3) wait until it is right.
+  Otherwise pip would pull a different torch from the ordinary index to
+  satisfy them (not the CUDA 12.8 build). Once torch is in, it is repeated
+  in every install so pip cannot &quot;upgrade&quot; it.
+
+  Verify by import, not only by version: each module is imported in the
+  env, since a package can be installed and still fail to load.
+
+  No `set -e` on purpose: one failure must not stop the rest from being
+  checked; the summary lists everything still wrong.</pre></td></tr></table><p>
+<table class="section">
+<tr class="decor functions-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Login Page <small>(<a href="../../app/static/login.html">app/static/login.html</a>)</small></strong></td></tr>
+    
+<tr><td class="decor functions-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><pre>Login Page
+
+  Page        : login.html   (Design: Log in State Diagram)
+  Date        : Created 2026-10-19
+  Programmer  : Sebastian
+
+  DESCRIPTION
+    The first page of the website. Log in, recover a forgotten email or
+    password, and register a new account. Talks to the endpoints in
+    main.py; a successful login goes to the dashboard (/dashboard).
+
+  IMPORTANT FUNCTIONS (in the script at the bottom of the page)
+    show(screenId)                  switches to one screen of the diagram
+    send(url, body, form)           POSTs JSON; returns {ok, status, data},
+                                    or null after showing the Server Error Box
+    serverError(status, detail)     shows the Server Error Box
+    markField(form, name, text)     marks one bad input, with its message
+    One submit handler per form: log in, forgot email, forgot password,
+    registration.
+
+  IMPORTANT DATA STRUCTURES
+    SCREENS      the ids of the 8 &lt;section&gt;s, one per state of the diagram
+    FIELD_NAMES  input name -&gt; label, for &quot;Please fill out: ...&quot; messages
+
+  ALGORITHMS
+    State machine: every state of the Log in State Diagram is one &lt;section&gt;;
+    show() hides all but one, and any element with data-go=&quot;&lt;screen&gt;&quot; moves
+    to that screen. Chosen over separate pages because it mirrors the
+    diagram one-to-one and switches instantly without reloading.
+
+    Validation twice: empty fields are caught in the page before sending
+    (quick feedback), and the backend checks everything again, since a page
+    can be bypassed. The backend names every bad field, and each is marked.</pre></td></tr></table><p>
+<table class="section">
+<tr class="decor functions-decor heading-text">
+<td class="section-title" colspan=3>&nbsp;<br><strong class="bigsection">Simulations (dashboard section) <small>(<a href="../../app/static/index.html">app/static/index.html</a>)</small></strong></td></tr>
+    
+<tr><td class="decor functions-decor"><span class="code">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span></td><td>&nbsp;</td>
+<td class="singlecolumn"><pre>Simulations (dashboard section)
+
+Component   : Simulation panel   (Design: Simulation Manager, page side)
+Date        : Created 2026-10-21, last updated 2026-11-02
+Programmer  : Sebastian
+
+DESCRIPTION
+  Lists the simulations, starts and stops them, and shows the running
+  one: its live output, its window in the page (for &quot;Run in browser&quot;),
+  and the physics twin&#x27;s results once its flight ends. The work itself
+  happens on the server (app/simulations.py).
+
+IMPORTANT FUNCTIONS
+  loadSimulations()          builds the table of simulations and buttons
+  startSimulation(id, where) asks the server to start one, then polls
+  stopSimulation()           asks the server to stop this session&#x27;s run
+  pollRun()                  fetches new output once a second while running
+  showRun(run)               updates status, buttons, viewer, output
+  showViewer(run)            puts the run&#x27;s window (noVNC) in the page
+  showResults(run)           shows the physics twin&#x27;s numbers and plot
+
+IMPORTANT DATA STRUCTURES
+  run (from GET /api/simulations/run): number, title, status, lines,
+    line_count, viewer {port, password}, results, server_running/max
+  linesShown / shownRun / viewerShownFor / resultsShownFor: what is
+    already on screen, so each update only adds what is new
+
+ALGORITHMS
+  Incremental polling: every second while a run is active, the page
+  asks for output lines &quot;since&quot; the count it has, and appends only
+  those. A new run number means a new run, so the output is cleared.
+  Chosen over WebSockets because plain HTTP requests are simpler and
+  work wherever the page itself loads; polling stops when the run ends.
+
+  The window is an &lt;iframe&gt; of noVNC on the run&#x27;s own viewer port, with
+  that run&#x27;s password, so each session sees only its own window.</pre></td></tr></table>
+</body></html>

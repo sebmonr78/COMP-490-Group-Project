@@ -1,7 +1,7 @@
 """Password Hashing: turns login passwords into salted hashes and checks them.
 
 Module      : passwords.py   (Design: Password Hashing)
-Date        : Created 2026-10-19
+Date        : Created 2026-10-15
 Programmer  : Sebastian
 
 DESCRIPTION

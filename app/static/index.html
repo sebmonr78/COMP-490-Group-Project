@@ -76,6 +76,85 @@
       cursor: pointer; 
     }
 
+    .account {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    #whoami {
+      color: #555;
+      font-size: 0.9rem;
+    }
+
+    /* Soft grey note for empty or loading messages (hides itself when empty) */
+    .note {
+      color: #667;
+      background: #f6f7f9;
+      border: 1px dashed #ccd;
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      margin-top: 0.75rem;
+    }
+
+    .note:empty {
+      display: none;
+    }
+
+    /* Summary line and filter buttons above the changes table */
+    .summary {
+      margin: 0.25rem 0 0;
+      font-weight: 600;
+    }
+
+    .filters {
+      display: flex;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+      margin-top: 0.5rem;
+    }
+
+    .filters:empty {
+      display: none;
+    }
+
+    /* Lets a wide table scroll sideways on a small screen */
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    /* The map picture for a scan saved from a DELTA run */
+    #map-block {
+      margin: 0.75rem 0 0;
+    }
+
+    #map-block img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      border: 1px solid #c9ccd3;
+      border-radius: 4px;
+    }
+
+    #map-block figcaption {
+      margin-top: 0.3rem;
+      font-size: 0.85rem;
+      color: #555;
+    }
+
+    /* The scan picker above the changes table */
+    #scan-picker-row label {
+      display: block;
+      margin-top: 0.75rem;
+    }
+
+    #scan-picker {
+      font: inherit;
+      padding: 0.3rem 0.5rem;
+      margin-left: 0.4rem;
+      max-width: 100%;
+    }
+
     /* Simulations */
     .status.starting, .status.running, .status.stopping { background: #d6e6ff; }
     .status.finished { background: #d4f5dc; }
@@ -105,7 +184,10 @@
       <h1>DELTA</h1>
       <p class="subtitle">Detecting Environmental Layout and Tracking Alterations</p>
     </div>
-    <button id="logout-button">Log out</button>
+    <div class="account">
+      <span id="whoami"></span>
+      <button id="logout-button">Log out</button>
+    </div>
   </header>
 
   <h2>Simulations</h2>
@@ -142,19 +224,32 @@
   </div>
 
   <h2>Drones</h2>
-  <table>
-    <thead><tr><th>Serial number</th><th>Status</th></tr></thead>
-    <tbody id="drone-rows"></tbody>
-  </table>
-  <p id="message"></p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Serial number</th><th>Status</th></tr></thead>
+      <tbody id="drone-rows"></tbody>
+    </table>
+  </div>
+  <p id="message" class="note"></p>
 
   <h2>What changed</h2>
+  <div id="scan-picker-row" hidden>
+    <label>Scan: <select id="scan-picker"></select></label>
+  </div>
   <p id="changes-subtitle" class="subtitle"></p>
-  <table>
-    <thead><tr><th>Change</th><th>Object</th><th>Details</th><th>Position (x, y, z)</th></tr></thead>
-    <tbody id="change-rows"></tbody>
-  </table>
-  <p id="changes-message"></p>
+  <figure id="map-block" hidden>
+    <img id="map-image" alt="Map of this scan">
+    <figcaption>The map this scan saved. Grey is not seen yet, white is free floor, dark is walls and furniture. Up is +y.</figcaption>
+  </figure>
+  <p id="changes-summary" class="summary"></p>
+  <div id="change-filters" class="filters"></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Change</th><th>Object</th><th>Details</th><th>Position (x, y, z)</th></tr></thead>
+      <tbody id="change-rows"></tbody>
+    </table>
+  </div>
+  <p id="changes-message" class="note"></p>
 
   <script>
     // Small helper: makes a table cell with some text in it
@@ -164,12 +259,29 @@
       return cell;
     }
 
+    // Turns "2026-10-12 10:00:00" into something like "Oct 12, 2026, 10:00 AM"
+    // If the date can't be read, it just shows the original text
+    function niceDate(text) {
+      const date = new Date(text.replace(" ", "T"));
+
+      if (isNaN(date)) {
+        return text;
+      }
+
+      return date.toLocaleString([], {
+        dateStyle: "medium",
+        timeStyle: "short"
+      });
+    }
+
     // Grabs the drone list from the backend and shows it in the table
     async function loadDrones() {
       const rows = document.getElementById("drone-rows");
       const message = document.getElementById("message");
 
       try {
+        message.textContent = "Loading drones…";
+
         // Ask our backend for the drones (same address we tested in the browser)
         const response = await fetch("/api/drones");
         if (response.status === 401) { window.location.href = "/"; return; }  // ticket is gone --> back to login
@@ -179,7 +291,7 @@
         const drones = await response.json();
 
         if (drones.length === 0) {
-          message.textContent = "No drones yet.";
+          message.textContent = "No drones yet. They will show up here once a drone is added to your account.";
           return;
         }
 
@@ -197,71 +309,220 @@
           row.append(makeCell(drone.serial_number), statusCell);
           rows.appendChild(row);
         }
+
+        message.textContent = "";  // done loading, clear the loading note
       } catch (error) {
         // If the backend is down or something breaks, say so instead of showing a blank page
         message.textContent = "Could not load drones: " + error.message;
       }
     }
 
-    // Shows what changed in the newest scan compared to the one before it
-    async function loadChanges() {
+    // All the changes from the latest scan, and which filter button is picked
+    let allChanges = [];
+    let activeFilter = "all";
+
+    // Builds one table row for one change
+    function makeChangeRow(change) {
+      const row = document.createElement("tr");
+
+      // Colored label: moved / appeared / disappeared
+      const typeCell = document.createElement("td");
+      const badge = document.createElement("span");
+      badge.className = "status " + change.change_type;
+      badge.textContent = change.change_type;
+      typeCell.appendChild(badge);
+
+      // Some changes have no object name, so fall back to something readable
+      const objectName = change.label || "Unknown object";
+
+      // Position might be missing, so show "?" instead of crashing
+      const position = [change.x, change.y, change.z]
+        .map(value => (value === null ? "?" : value.toFixed(1)))
+        .join(", ");
+
+      row.append(
+        typeCell,
+        makeCell(objectName),
+        makeCell(change.description || ""),
+        makeCell(position)
+      );
+      return row;
+    }
+
+    // Fills the table with the changes that match the picked filter
+    function showChanges() {
       const rows = document.getElementById("change-rows");
+      rows.replaceChildren();
+
+      for (const change of allChanges) {
+        if (activeFilter === "all" || change.change_type === activeFilter) {
+          rows.appendChild(makeChangeRow(change));
+        }
+      }
+    }
+
+    // Shows "4 changes: 2 moved, 1 appeared" and one filter button per type
+    function showSummaryAndFilters() {
+      const summary = document.getElementById("changes-summary");
+      const filters = document.getElementById("change-filters");
+
+      // Count how many changes there are of each type
+      const counts = {};
+      for (const change of allChanges) {
+        counts[change.change_type] = (counts[change.change_type] || 0) + 1;
+      }
+
+      const parts = Object.keys(counts).map(type => counts[type] + " " + type);
+      const word = allChanges.length === 1 ? " change" : " changes";
+      summary.textContent = allChanges.length + word + ": " + parts.join(", ");
+
+      // One button for "all", plus one for each type that actually shows up
+      filters.replaceChildren();
+      const choices = ["all", ...Object.keys(counts)];
+
+      for (const choice of choices) {
+        const count = choice === "all" ? allChanges.length : counts[choice];
+        const button = document.createElement("button");
+        button.textContent = choice + " (" + count + ")";
+        button.className = choice === activeFilter ? "" : "secondary";
+
+        button.addEventListener("click", () => {
+          activeFilter = choice;
+          showSummaryAndFilters();  // redraw so the picked button looks picked
+          showChanges();
+        });
+
+        filters.appendChild(button);
+      }
+    }
+
+    // All of this user's scans, newest first, and which one the page is showing
+    let scans = [];
+    let shownScan = null;
+
+    // What one scan looks like in the picker: "Oct 12, 2026, 10:00 AM · 4 changes · map"
+    function scanLabel(scan) {
+      const changes = scan.change_count === 1 ? "1 change" : scan.change_count + " changes";
+      return niceDate(scan.started_at) + " · " + changes + (scan.map_count ? " · map" : "");
+    }
+
+    // Shows the scan's map picture, if it has one (the demo scans don't)
+    function showMapPicture(scan) {
+      const block = document.getElementById("map-block");
+      const image = document.getElementById("map-image");
+      block.hidden = true;
+      image.removeAttribute("src");
+      if (!scan.picture_count) return;
+
+      const id = scan.session_id;
+      image.onload = () => { if (shownScan === id) block.hidden = false; };
+      image.onerror = () => { block.hidden = true; };   // no broken-image icon
+      image.src = "/api/sessions/" + id + "/map";
+    }
+
+    // Shows one scan: its date, then what changed in it
+    async function showScan(scan) {
       const message = document.getElementById("changes-message");
-      const subtitle = document.getElementById("changes-subtitle");
+      shownScan = scan.session_id;
+
+      // Start from a clean slate, so the last scan's rows and buttons don't linger
+      allChanges = [];
+      activeFilter = "all";
+      document.getElementById("changes-summary").textContent = "";
+      document.getElementById("change-filters").replaceChildren();
+      showChanges();
+      showMapPicture(scan);
+
+      const latest = scan === scans[0] ? " (latest)" : "";
+      document.getElementById("changes-subtitle").textContent =
+        "Scan: " + niceDate(scan.started_at) + latest;
 
       try {
-        // The backend sends scans newest first, so the first one is the latest
-        const sessionsResponse = await fetch("/api/sessions");
-        if (sessionsResponse.status === 401) { window.location.href = "/"; return; }
-        if (!sessionsResponse.ok) throw new Error("Server returned " + sessionsResponse.status);
-        const sessions = await sessionsResponse.json();
+        message.textContent = "Loading changes…";
+        const response = await fetch("/api/sessions/" + scan.session_id + "/changes");
 
-        if (sessions.length === 0) {
-          message.textContent = "No scans yet.";
+        if (response.status === 401) {
+          window.location.href = "/";  // ticket is gone --> back to login
           return;
         }
 
-        const latest = sessions[0];
-        subtitle.textContent = "Latest scan: " + latest.started_at;
-
-        // Now ask for the changes found in that scan
-        const response = await fetch("/api/sessions/" + latest.session_id + "/changes");
         if (!response.ok) throw new Error("Server returned " + response.status);
         const changes = await response.json();
 
+        // Picked another scan while this one was loading: that one wins
+        if (shownScan !== scan.session_id) return;
+
         if (changes.length === 0) {
-          message.textContent = "Nothing changed since the last scan.";
+          message.textContent = "No changes recorded for this scan.";
           return;
         }
 
-        for (const change of changes) {
-          const row = document.createElement("tr");
+        allChanges = changes;
+        showSummaryAndFilters();
+        showChanges();
 
-          // Colored label: moved / appeared / disappeared
-          const typeCell = document.createElement("td");
-          const badge = document.createElement("span");
-          badge.className = "status " + change.change_type;
-          badge.textContent = change.change_type;
-          typeCell.appendChild(badge);
-
-          // Some changes have no object name, so fall back to something readable
-          const objectName = change.label || "Unknown object";
-
-          // Position might be missing, so show "?" instead of crashing
-          const position = [change.x, change.y, change.z]
-            .map(value => (value === null ? "?" : value.toFixed(1)))
-            .join(", ");
-
-          row.append(
-            typeCell,
-            makeCell(objectName),
-            makeCell(change.description || ""),
-            makeCell(position)
-          );
-          rows.appendChild(row);
+        message.textContent = "";  // done loading, clear the loading note
+      } catch (error) {
+        if (shownScan === scan.session_id) {
+          message.textContent = "Could not load changes: " + error.message;
         }
+      }
+    }
+
+    // Lists this user's scans in the picker and shows one of them
+    async function loadChanges(preferredScan = null) {
+      const message = document.getElementById("changes-message");
+      const picker = document.getElementById("scan-picker");
+
+      try {
+        message.textContent = "Loading changes…";
+
+        // The backend sends scans newest first
+        const response = await fetch("/api/sessions");
+        if (response.status === 401) { window.location.href = "/"; return; }
+        if (!response.ok) throw new Error("Server returned " + response.status);
+        scans = await response.json();
+
+        if (scans.length === 0) {
+          message.textContent = "No scans yet. Once a scan is saved to your account, what changed will show up here.";
+          return;
+        }
+
+        for (const scan of scans) {
+          const option = document.createElement("option");
+          option.value = scan.session_id;
+          option.textContent = scanLabel(scan);
+          picker.appendChild(option);
+        }
+        document.getElementById("scan-picker-row").hidden = false;
+
+        picker.addEventListener("change", () => {
+          showScan(scans.find(scan => String(scan.session_id) === picker.value));
+        });
+
+        // Start on the newest scan that has changes (a scan saved from a live run
+        // has none yet), or just the newest if none do
+        const first = scans.find(scan => scan.session_id === preferredScan) ||
+          scans.find(scan => scan.change_count > 0) || scans[0];
+        picker.value = first.session_id;
+        await showScan(first);
       } catch (error) {
         message.textContent = "Could not load changes: " + error.message;
+      }
+    }
+
+    // Shows "Logged in as <name>" next to the Log out button
+    async function loadMe() {
+      const whoami = document.getElementById("whoami");
+      try {
+        const response = await fetch("/api/me");
+        if (!response.ok) return;   // header just stays blank, the rest of the page still works
+        const me = await response.json();
+        const name = ((me.first_name || "") + " " + (me.last_name || "")).trim();
+        whoami.textContent = "Logged in as " + (name || me.email);
+        whoami.title = me.email;    // hover to see the email
+      } catch (error) {
+        // header stays blank
       }
     }
 
@@ -275,7 +536,7 @@
      * Simulations (dashboard section)
      *
      * Component   : Simulation panel   (Design: Simulation Manager, page side)
-     * Date        : Created 2026-10-21, last updated 2026-11-02
+     * Date        : Created 2026-10-15, last updated 2026-11-02
      * Programmer  : Sebastian
      *
      * DESCRIPTION
@@ -313,6 +574,7 @@
     let linesShown = 0;      // how many output lines are already on screen
     let shownRun = null;     // which run they belong to (its number)
     let pollTimer = null;
+    let refreshedScanForRun = null;
 
     /**
      * Builds the Simulations table from GET /api/simulations: one row per
@@ -510,6 +772,9 @@
 
         if (run.status === "starting" || run.status === "running" || run.status === "stopping") {
           pollTimer = setTimeout(pollRun, 1000);
+        } else if (run.saved_scan_id && refreshedScanForRun !== run.number) {
+          refreshedScanForRun = run.number;
+          await Promise.all([loadDrones(), loadChanges(run.saved_scan_id)]);
         }
       } catch (error) {
         document.getElementById("sim-message").textContent = "Lost contact with the server: " + error.message;
@@ -609,6 +874,7 @@
     // Run everything as soon as the page opens
     loadSimulations().then(pollRun);
     loadDrones();
+    loadMe();
     loadChanges();
   </script>
   

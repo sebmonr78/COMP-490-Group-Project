@@ -10,6 +10,7 @@ delta.db is never touched, and no real email is ever sent.
 
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -32,11 +33,13 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "database"))
 
 import db
+import import_run
 import seed
 from fastapi.testclient import TestClient
 
 import main
 import simulations
+from test_import_run import fake_memory_folder
 
 DEMO = {"email": "demo@example.com", "password": "demo1234"}
 DEMO_PHONE = "5555550100"
@@ -82,6 +85,7 @@ class AppTest(unittest.TestCase):
 
         main.SESSIONS.clear()
         main.FAILED_LOGINS.clear()
+        main.FAILED_BY_IP.clear()
         main.RESET_TOKENS.clear()
         self.client = TestClient(main.app)
 
@@ -123,8 +127,8 @@ class LoginAndLogout(AppTest):
 
     def test_logged_out_data_and_simulation_endpoints_return_401(self):
         for method, url in [
-            ("get", "/api/drones"), ("get", "/api/sessions"),
-            ("get", "/api/sessions/2/changes"),
+            ("get", "/api/drones"), ("get", "/api/me"), ("get", "/api/sessions"),
+            ("get", "/api/sessions/2/changes"), ("get", "/api/sessions/2/map"),
             ("get", "/api/simulations"), ("get", "/api/simulations/run"),
             ("post", "/api/simulations/stop"),
         ]:
@@ -147,6 +151,11 @@ class EachUserSeesOnlyTheirOwnData(AppTest):
         self.assertEqual([d["serial_number"] for d in drones], ["DELTA-SIM-0001"])
         sessions = self.client.get("/api/sessions").json()
         self.assertEqual([s["session_id"] for s in sessions], [2, 1])  # newest first
+        # what the page's scan picker shows for each: how many changes, how many maps,
+        # and whether there is a map picture (the demo scans have none)
+        self.assertEqual([(s["change_count"], s["map_count"], s["picture_count"]) for s in sessions],
+                         [(4, 1, 0), (0, 1, 0)])
+        self.assertEqual(self.client.get("/api/sessions/2/map").status_code, 404)
         changes = self.client.get("/api/sessions/2/changes")
         self.assertEqual(changes.status_code, 200)
         self.assertEqual(len(changes.json()), 4)
@@ -156,6 +165,21 @@ class EachUserSeesOnlyTheirOwnData(AppTest):
         self.assertEqual(login(self.client, "new@example.com", "secret123").status_code, 200)
         self.assertEqual(self.client.get("/api/drones").json(), [])
         self.assertEqual(self.client.get("/api/sessions").json(), [])
+
+    def test_me_says_who_is_logged_in(self):
+        self.login_demo()
+        response = self.client.get("/api/me")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "first_name": "Demo", "last_name": "User", "email": DEMO["email"],
+        })  # no password hash in here
+
+    def test_me_is_each_users_own_info(self):
+        register(self.client, "new@example.com")
+        login(self.client, "new@example.com", "secret123")
+        me = self.client.get("/api/me").json()
+        self.assertEqual(me["email"], "new@example.com")
+        self.assertEqual(me["first_name"], "Test")
 
     def test_somebody_elses_scan_is_not_found(self):
         register(self.client, "new@example.com")
@@ -187,13 +211,30 @@ class Lockout(AppTest):
 
     def test_the_lock_runs_out(self):
         self.wrong_tries(DEMO["email"], 5)
-        main.FAILED_LOGINS[DEMO["email"]]["locked_until"] = time.time() - 1
+        main.FAILED_LOGINS[("testclient", DEMO["email"])]["locked_until"] = time.time() - 1
         self.assertEqual(login(self.client, **DEMO).status_code, 200)
 
     def test_one_email_being_locked_does_not_lock_another(self):
         register(self.client, "other@example.com")
         self.wrong_tries(DEMO["email"], 5)
         self.assertEqual(login(self.client, "other@example.com", "secret123").status_code, 200)
+
+    def test_a_different_computer_is_not_locked_out(self):
+        self.wrong_tries(DEMO["email"], 5)   # this computer is locked for that email
+        elsewhere = TestClient(main.app, client=("10.0.0.2", 50000))
+        self.assertEqual(login(elsewhere, **DEMO).status_code, 200)
+
+    def test_twenty_wrong_tries_from_one_computer_lock_that_computer(self):
+        for number in range(20):
+            self.assertEqual(login(self.client, f"nobody{number}@example.com", "wrong").status_code, 401)
+        # each email was only tried once, but the computer has had 20 wrong tries
+        self.assertEqual(login(self.client, **DEMO).status_code, 429)
+
+    def test_quiet_computers_are_forgotten(self):
+        self.wrong_tries(DEMO["email"], 2)
+        main.FAILED_LOGINS[("testclient", DEMO["email"])]["last_try"] = time.time() - 16 * 60
+        login(self.client, "nobody@example.com", "wrong")   # any login clears out old entries
+        self.assertNotIn(("testclient", DEMO["email"]), main.FAILED_LOGINS)
 
 
 class PasswordReset(AppTest):
@@ -442,6 +483,269 @@ class SimulationsSideBySide(AppTest):
         self.assertEqual(picture.status_code, 200)
         self.assertEqual(picture.headers["content-type"], "image/png")
         self.assertEqual(theirs.get(run["results"]["picture"]).status_code, 404)
+
+
+# What DELTA does when the page stops it: save its map, then quit. This stand-in
+# copies a ready-made map folder to the place DELTA would write it.
+FAKE_DELTA = [sys.executable, "-c", """
+import shutil, signal, sys, time
+template, memory = sys.argv[1], sys.argv[2]
+def save_and_quit(*_):
+    shutil.copytree(template, memory, copy_function=shutil.copy)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, save_and_quit)
+print("ready", flush=True)
+time.sleep(60)
+"""]
+
+
+class DeltaMapsAreSaved(AppTest):
+    """A finished DELTA run is saved to the account of the user who started it."""
+
+    browser = SimulationsSideBySide.browser
+    wait_for = SimulationsSideBySide.wait_for
+    stop_everything = SimulationsSideBySide.stop_everything
+
+    def setUp(self):
+        super().setUp()
+        self.twin_out = tempfile.TemporaryDirectory()      # stop_everything cleans this up
+        self.sim_dir = Path(self.twin_out.name)
+        # laid out like a real run: memory/<scene>/<pose source>/ holds the map
+        fake_memory_folder(self.sim_dir / "template" / "102816036" / "rtabmap")
+        delta = {"kind": "command", "title": "DELTA", "cwd": str(self.sim_dir),
+                 "command": FAKE_DELTA + [str(self.sim_dir / "template"), "outputs/runs/{run}/memory"],
+                 "description": "", "interactive": False}
+        patches = [
+            mock.patch.dict(simulations.SIMULATIONS, {"delta": delta}, clear=True),
+            mock.patch.object(simulations, "SIMULATION_DIR", self.sim_dir),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.addCleanup(self.stop_everything)
+
+    def scans(self, client):
+        return [s["session_id"] for s in client.get("/api/sessions").json()]
+
+    def run_and_stop(self, client):
+        client.post("/api/simulations/delta/start")
+        self.wait_for(client, "running")
+        client.post("/api/simulations/stop")
+        return self.wait_for(client, "stopped")
+
+    def test_the_map_of_a_stopped_run_shows_up_as_a_new_scan(self):
+        client = self.browser()
+        before = self.scans(client)
+        run = self.run_and_stop(client)
+        after = self.scans(client)
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertEqual(after[0], max(after))                      # newest first
+        newest = client.get("/api/sessions").json()[0]
+        self.assertEqual((newest["change_count"], newest["map_count"], newest["picture_count"]),
+                         (0, 1, 1))                                   # a map and its picture, no changes yet
+        self.assertIn(f"[website] Map saved to your account as scan {after[0]}.", run["lines"])
+
+    def test_the_saved_map_picture_can_be_fetched(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        scan = client.get("/api/sessions").json()[0]["session_id"]
+        picture = client.get(f"/api/sessions/{scan}/map")
+        self.assertEqual(picture.status_code, 200)
+        self.assertEqual(picture.headers["content-type"], "image/png")
+        self.assertEqual(picture.headers["cache-control"], "no-store")
+        self.assertEqual(picture.content[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_another_user_cannot_fetch_the_picture(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        scan = client.get("/api/sessions").json()[0]["session_id"]
+        register(self.client, "other@example.com")
+        other = self.browser("other@example.com", "secret123")
+        self.assertEqual(other.get(f"/api/sessions/{scan}/map").status_code, 404)
+        self.assertEqual(other.get("/api/sessions").json(), [])
+
+    def test_a_picture_that_is_gone_or_points_outside_saved_runs_is_a_404(self):
+        client = self.browser()
+        self.run_and_stop(client)
+        scan = client.get("/api/sessions").json()[0]["session_id"]
+        self.assertEqual(client.get(f"/api/sessions/{scan}/map").status_code, 200)
+
+        # a row that points outside saved_runs must not be served, even if the file exists
+        secret = import_run.saved_runs_dir().parent / "secret.png"
+        secret.write_bytes(b"not for you")
+        conn = db.connect()
+        with conn:
+            conn.execute("UPDATE File SET storage_url = 'secret.png' "
+                         "WHERE session_id = ? AND mime_type = 'image/png'", (scan,))
+        conn.close()
+        self.assertEqual(client.get(f"/api/sessions/{scan}/map").status_code, 404)
+
+        # a file that was deleted from disk is a 404 too, not a crash
+        conn = db.connect()
+        with conn:
+            conn.execute("UPDATE File SET storage_url = ? WHERE session_id = ? AND mime_type = 'image/png'",
+                         (f"saved_runs/session-{scan}/map.png", scan))
+        conn.close()
+        (import_run.saved_runs_dir() / f"session-{scan}" / "map.png").unlink()
+        self.assertEqual(client.get(f"/api/sessions/{scan}/map").status_code, 404)
+
+    def test_another_user_does_not_see_it(self):
+        register(self.client, "other@example.com")
+        other = self.browser("other@example.com", "secret123")
+        self.run_and_stop(self.browser())
+        self.assertEqual(self.scans(other), [])
+
+    def test_it_is_saved_for_the_user_even_if_they_logged_out_to_stop_it(self):
+        client = self.browser()
+        before = self.scans(client)
+        client.post("/api/simulations/delta/start")
+        self.wait_for(client, "running")
+        process = next(iter(simulations._runs.values()))["process"]
+        client.post("/api/logout")                         # stops the run; the ticket is gone
+        process.wait(timeout=10)
+
+        again = self.browser()
+        deadline = time.time() + 10
+        while time.time() < deadline and len(self.scans(again)) == len(before):
+            time.sleep(0.05)
+        self.assertEqual(len(self.scans(again)), len(before) + 1)
+
+    def test_a_run_that_made_no_map_saves_nothing(self):
+        shutil.rmtree(self.sim_dir / "template")           # DELTA has nothing to write
+        client = self.browser()
+        before = self.scans(client)
+        run = self.run_and_stop(client)
+        self.assertEqual(self.scans(client), before)
+        self.assertIn("[website] No new map to save.", run["lines"])
+
+    def test_only_delta_runs_are_saved(self):
+        other = dict(simulations.SIMULATIONS["delta"], title="Something else")
+        with mock.patch.dict(simulations.SIMULATIONS, {"other": other}):
+            client = self.browser()
+            before = self.scans(client)
+            client.post("/api/simulations/other/start")
+            self.wait_for(client, "running")
+            client.post("/api/simulations/stop")
+            run = self.wait_for(client, "stopped")
+        self.assertEqual(self.scans(client), before)
+        self.assertFalse([line for line in run["lines"] if line.startswith("[website]")])
+
+    def test_a_failed_save_does_not_stop_the_run_from_ending(self):
+        client = self.browser()
+        with mock.patch.object(simulations, "save_finished_run", side_effect=RuntimeError("boom")):
+            run = self.run_and_stop(client)
+        self.assertEqual(run["status"], "stopped")
+        self.assertIn("[website] Could not save the map to your account: boom", run["lines"])
+
+    def test_save_confirmation_is_the_final_output_line_and_names_the_scan(self):
+        run = self.run_and_stop(self.browser())
+        self.assertEqual(run["lines"][-1],
+                         f"[website] Map saved to your account as scan {run['saved_scan_id']}.")
+        self.assertIsInstance(run["saved_scan_id"], int)
+
+    def test_recent_unchanged_map_from_previous_run_is_not_imported(self):
+        memory = self.sim_dir / "outputs/runs/web-1/memory"
+        fake_memory_folder(memory)
+        recent = memory / "grid.npz"
+        run = {"id": "delta", "slot": 1, "user_id": 1, "started_at": db.now(),
+               "map_before": simulations._map_snapshot(1), "lines": [], "line_count": 0}
+        with mock.patch.object(simulations, "save_finished_run") as save:
+            simulations._save_map(run)
+        save.assert_not_called()
+        self.assertEqual(run["lines"], ["[website] No new map to save."])
+        self.assertIsNone(run["saved_scan_id"])
+
+    def test_recent_unchanged_map_in_nested_scene_folder_is_not_imported(self):
+        memory = self.sim_dir / "outputs/runs/web-1/memory"
+        fake_memory_folder(memory / "102816036/rtabmap")
+        run = {"id": "delta", "slot": 1, "user_id": 1, "started_at": db.now(),
+               "map_before": simulations._map_snapshot(1), "lines": [], "line_count": 0}
+        with mock.patch.object(simulations, "save_finished_run") as save:
+            simulations._save_map(run)
+        save.assert_not_called()
+        self.assertEqual(run["lines"], ["[website] No new map to save."])
+
+    def test_removing_one_old_map_does_not_import_another_unchanged_map(self):
+        memory = self.sim_dir / "outputs/runs/web-1/memory"
+        old = memory / "111/rtabmap"
+        fake_memory_folder(old)
+        fake_memory_folder(memory / "222/rtabmap")
+        run = {"id": "delta", "slot": 1, "user_id": 1, "started_at": db.now(),
+               "map_before": simulations._map_snapshot(1), "lines": [], "line_count": 0}
+        shutil.rmtree(old)
+        with mock.patch.object(simulations, "save_finished_run") as save:
+            simulations._save_map(run)
+        save.assert_not_called()
+        self.assertEqual(run["lines"], ["[website] No new map to save."])
+
+    def test_updated_nested_map_is_imported_and_previous_map_is_ignored(self):
+        memory = self.sim_dir / "outputs/runs/web-1/memory"
+        folder = memory / "102816036/rtabmap"
+        fake_memory_folder(folder)
+        before = simulations._map_snapshot(1)
+        folder.rename(folder.with_name("rtabmap.previous"))
+        fake_memory_folder(folder)
+        run = {"id": "delta", "slot": 1, "user_id": 1, "started_at": db.now(),
+               "map_before": before, "lines": [], "line_count": 0}
+        simulations._save_map(run)
+        self.assertIsInstance(run["saved_scan_id"], int)
+        self.assertEqual(run["lines"], [f"[website] Map saved to your account as scan {run['saved_scan_id']}."])
+
+    def test_slot_remains_busy_until_map_import_and_final_message_are_complete(self):
+        import threading
+
+        client = self.browser()
+        entered, release = threading.Event(), threading.Event()
+        original = simulations.save_finished_run
+
+        def delayed(*args):
+            entered.set()
+            self.assertTrue(release.wait(timeout=10))
+            return original(*args)
+
+        with mock.patch.object(simulations, "save_finished_run", side_effect=delayed):
+            try:
+                client.post("/api/simulations/delta/start")
+                self.wait_for(client, "running")
+                client.post("/api/simulations/stop")
+                self.assertTrue(entered.wait(timeout=10))
+                run = client.get("/api/simulations/run").json()["run"]
+                self.assertEqual(run["status"], "stopping")
+                self.assertEqual(run["server_running"], 1)
+                self.assertIsNone(run["saved_scan_id"])
+                self.assertEqual(client.post("/api/simulations/delta/start").status_code, 409)
+            finally:
+                release.set()
+            run = self.wait_for(client, "stopped")
+        self.assertEqual(run["server_running"], 0)
+        self.assertTrue(run["lines"][-1].startswith("[website] Map saved to your account as scan "))
+
+    def test_save_error_is_a_single_final_line(self):
+        with mock.patch.object(simulations, "save_finished_run", side_effect=RuntimeError("database busy\ntry again")):
+            run = self.run_and_stop(self.browser())
+        self.assertEqual(run["lines"][-1], "[website] Could not save the map to your account: database busy try again")
+        self.assertIsNone(run["saved_scan_id"])
+
+    def test_viewer_cleanup_failure_does_not_lose_the_map(self):
+        screen = mock.Mock()
+        screen.stop.side_effect = RuntimeError("viewer exited")
+        run = {"id": "delta", "process": mock.Mock(), "screen": screen, "slot": 1,
+               "user_id": 1, "started_at": db.now(), "status": "stopping",
+               "lines": [], "line_count": 0}
+        run["process"].stdout = StringIO("DELTA finished\n")
+        run["process"].wait.return_value = 0
+        with mock.patch.object(simulations, "save_finished_run", return_value=3):
+            simulations._read_output(run)
+        self.assertEqual(run["status"], "stopped")
+        self.assertEqual(run["lines"][-1], "[website] Map saved to your account as scan 3.")
+
+    def test_the_website_hands_simulations_what_it_needs(self):
+        self.assertIs(simulations.save_finished_run, import_run.import_run)
+        self.assertIs(simulations.find_map_folder, import_run.find_map_folder)
+        self.assertIsNone(simulations.user_for_session("no-such-ticket"))
+        user_id = login(self.client, **DEMO).json()["user_id"]
+        token = self.client.cookies.get(main.SESSION_COOKIE)
+        self.assertEqual(simulations.user_for_session(token), user_id)
 
 
 if __name__ == "__main__":

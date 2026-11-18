@@ -66,12 +66,12 @@ around. Its numbers are in the top left; the help is in the bottom right
 
 | Keys | | Mouse | |
 |---|---|---|---|
-| Up / Down | forward / back | left drag | turn the view around the drone |
+| Up / Down | forward / back (on the floor: roll) | left drag | turn the view around the drone |
 | Left / Right | turn | right drag | slide the view |
 | 1 / 0 (or Page Up / Down) | up / down — 1 on the floor takes off | scroll | zoom (wheel up = in) |
 | Shift | faster | double-click | pick a thing (again: let go) |
 | Space | stop and hold | Ctrl + right drag | push what is picked — the drone too |
-| L | land (motors stop on the floor) | Ctrl + left drag | twist it |
+| L | land (motors stop, then it rolls) | Ctrl + left drag | twist it |
 | G | a gust from the side | | |
 | R | start again | F | the view follows the drone, or stays |
 | Esc | quit | C | the view back on the drone |
@@ -141,7 +141,10 @@ Not yet, in the order they are planned:
 1. **Sensors** — the flight brain still reads the drone's true position and
    speed; next it gets a gyro, an accelerometer, a height laser and an
    optical flow sensor instead, as the real one will.
-2. **Rolling** — on the floor with the motors off it just sits.
+2. **Rolling, measured** — on the floor (motors off) the drone now rolls: Up / Down
+   drive the cage like a wheel, Left / Right turn it, 1 takes off. The drive is a
+   modelled force on the cage and a yaw torque, not a measured part; its power
+   draw is an assumption. Still to do: a real drive and its energy cost.
 3. **The battery** — its voltage dropping as it empties, and current limits.
 4. **Ground effect, walls, crashes.**
 5. **The mapping sensors**, and connecting it to the mapping brain in

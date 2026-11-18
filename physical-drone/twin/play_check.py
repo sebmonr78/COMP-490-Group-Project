@@ -243,14 +243,30 @@ def script(app, out, results):
     inp.key("l", False)
     for _ in range(100):
         yield 0.1
-        if app.pilot.mode == "landed":
+        if app.pilot.mode == "rolling":
             break
     cage = twin.body.cage
     under = sorted({app.names[g] for c in d.contact[:d.ncon]
                     if cage in (twin.model.geom_bodyid[c.geom1], twin.model.geom_bodyid[c.geom2])
                     for g in (c.geom1, c.geom2) if twin.model.geom_bodyid[g] != cage})
-    check("L lands, motors off", app.pilot.mode == "landed" and not twin.motors[0].armed,
+    check("L lands, motors off", app.pilot.mode == "rolling" and not twin.motors[0].armed,
           f"{app.pilot.mode} at {d.qpos[0]:.2f}, {d.qpos[1]:.2f}, {d.qpos[2] - 0.225:.2f} m up, on {under}")
+
+    # 8b. Rolling: Up rolls the landed drone along the floor, the cage turning like a wheel.
+    x0 = d.qpos[0:2].copy()
+    inp.key("Up", True)
+    yield 1.5
+    inp.key("Up", False)
+    yield 1.0
+    check("Up rolls it along the floor", np.linalg.norm(d.qpos[0:2] - x0) > 0.2 and app.pilot.mode == "rolling"
+          and not twin.motors[0].armed, f"rolled {100 * np.linalg.norm(d.qpos[0:2] - x0):.0f} cm, motors off")
+    h1 = heading(d.qpos[3:7])
+    inp.key("Left", True)
+    yield 1.0
+    inp.key("Left", False)
+    yield 0.5
+    check("Left turns it on the spot", abs(math.remainder(heading(d.qpos[3:7]) - h1, 2 * math.pi)) > math.radians(15),
+          f"turned {math.degrees(math.remainder(heading(d.qpos[3:7]) - h1, 2 * math.pi)):.0f} deg")
 
     # 9. Pick a box and push it: look at box 1, double-click it, Ctrl + right drag.
     box = mujoco.mj_name2id(twin.model, mujoco.mjtObj.mjOBJ_BODY, "box 1")
@@ -281,7 +297,7 @@ def script(app, out, results):
     inp.key("r", True)
     inp.key("r", False)
     yield 0.3
-    check("R starts again", np.linalg.norm(d.qpos[0:2]) < 0.01 and app.pilot.mode == "on the floor",
+    check("R starts again", np.linalg.norm(d.qpos[0:2]) < 0.01 and app.pilot.mode == "rolling",
           f"at {d.qpos[0]:.2f}, {d.qpos[1]:.2f}; {app.pilot.mode}")
     check("no key stuck down", not app.held, f"held: {sorted(app.held)}")
     inp.key("Escape", True)
