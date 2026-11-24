@@ -14,8 +14,13 @@ from pydantic import BaseModel
 sys.path.append(str(Path(__file__).resolve().parents[1] / "database"))
 
 import db
+import import_run
 import mailer
 import passwords
+import server_environment
+
+server_environment.configure()
+
 import simulations
 
 @asynccontextmanager
@@ -45,11 +50,16 @@ SESSIONS = {}
 SESSION_COOKIE = "delta_session"
 SESSION_HOURS = 2  # how long a login lasts before you have to log in again
 
-# wrong passwords per email: email --> {"count": wrong tries so far, "locked_until": time}
+# wrong passwords per computer + email: (address, email) --> {"count", "locked_until", "last_try"}
+# keyed by both, so a stranger on another computer can't lock someone out of their account
 # in memory too, so a server restart clears it
 FAILED_LOGINS = {}
-MAX_LOGIN_FAILURES = 5     # wrong tries before the lock
-LOGIN_LOCK_MINUTES = 5     # how long the lock lasts
+# wrong passwords per computer over all emails: address --> same kind of entry
+FAILED_BY_IP = {}
+MAX_LOGIN_FAILURES = 5       # wrong tries (one computer, one email) before the lock
+MAX_IP_FAILURES = 20         # wrong tries from one computer, any emails, before the lock
+LOGIN_LOCK_MINUTES = 5       # how long a lock lasts
+FAILURE_MEMORY_MINUTES = 15  # a computer that stays quiet this long is forgotten
 
 # reset tokens waiting to be used: token --> (user_id, expires_at)
 # in memory, like SESSIONS, so a server restart forgets them
@@ -77,12 +87,40 @@ def require_login(request: Request):
         raise HTTPException(status_code=401, detail="You got to log in!! Your drone is in another castle.")
     return user_id
 
+def client_address(request: Request):
+    """The address of the computer making this request ("unknown" if we can't tell)."""
+    return request.client.host if request.client else "unknown"
+
+def forget_old_failures():
+    """Throws away wrong-try counts for computers that have been quiet for
+    FAILURE_MEMORY_MINUTES, so the two tables can't grow forever."""
+    cutoff = time.time() - FAILURE_MEMORY_MINUTES * 60
+    for table in (FAILED_LOGINS, FAILED_BY_IP):
+        for key in [k for k, entry in table.items() if entry["last_try"] < cutoff]:
+            del table[key]
+
+def count_failure(table, key, limit):
+    """Adds one wrong try for key. At `limit` tries it locks for LOGIN_LOCK_MINUTES."""
+    entry = table.setdefault(key, {"count": 0, "locked_until": 0, "last_try": 0})
+    entry["count"] += 1
+    entry["last_try"] = time.time()
+    if entry["count"] >= limit:
+        entry["locked_until"] = time.time() + LOGIN_LOCK_MINUTES * 60
+        entry["count"] = 0
+
 # The Run buttons for the simulation scripts (see simulations.py)
 # Has to come after require_login: the login check protects all four of its endpoints.
 # Each login session (its session cookie) gets its own simulation, so two
 # people, or one account on two devices, can each run one at the same time.
 # simulations.py reads the same cookie to tell the sessions apart.
 simulations.SESSION_COOKIE = SESSION_COOKIE
+# Two more things simulations.py needs from this file, handed over the same way
+# so it never has to import main.py: who is behind a login ticket, and how to
+# save a finished DELTA run's map to that person's account (database/import_run.py)
+simulations.user_for_session = lambda token: SESSIONS.get(token, (None,))[0]
+simulations.save_finished_run = import_run.import_run
+# Freshness checks and saving must select the same map folder.
+simulations.find_map_folder = import_run.find_map_folder
 app.include_router(simulations.router, dependencies=[Depends(require_login)])
 
 @app.get("/")
@@ -115,15 +153,107 @@ def list_drones(user_id: int = Depends(require_login)):
     )
 
 
+@app.get("/api/me")
+def who_am_i(user_id: int = Depends(require_login)):
+    """GET /api/me: who is logged in, for the dashboard header.
+
+    Returns:
+        dict: {"first_name", "last_name", "email"} of the logged-in user.
+        The password hash is never sent.
+
+    Raises:
+        HTTPException: 401 if not logged in (from require_login), or if the
+        account no longer exists.
+    """
+    rows = query("SELECT first_name, last_name, email FROM User WHERE user_id = ?", (user_id,))
+    if not rows:
+        raise HTTPException(status_code=401, detail="You got to log in!! Your drone is in another castle.")
+    return rows[0]
+
+
 @app.get("/api/sessions")
 def list_sessions(user_id: int = Depends(require_login)):
-    # Newest scan first, only scans made by this user's drones
-    return query(
-        "SELECT s.session_id, s.drone_id, s.started_at, s.ended_at "
+    # Newest scan first, only scans made by this user's drones.
+    # change_count, map_count and picture_count let the page's scan picker say what is
+    # in each scan, and tell it whether there is a map picture to show.
+    scans = query(
+        "SELECT s.session_id, s.drone_id, s.started_at, s.ended_at, "
+        "(SELECT COUNT(*) FROM ChangeRecord c WHERE c.current_session_id = s.session_id) AS change_count, "
+        "(SELECT COUNT(*) FROM MapRecord m WHERE m.session_id = s.session_id) AS map_count, "
+        "(SELECT COUNT(*) FROM File f WHERE f.session_id = s.session_id "
+        "AND f.file_type = 'map_export' AND f.mime_type = 'image/png') AS picture_count "
         "FROM Session s JOIN Drone d ON d.drone_id = s.drone_id "
-        "WHERE d.owner_id = ? ORDER BY s.started_at DESC",
+        "WHERE d.owner_id = ? ORDER BY s.started_at DESC, s.session_id DESC",
         (user_id,),
     )
+
+    # Scans saved from a DELTA run (they have a grid.npz) are compared with the
+    # user's previous one when they are saved (import_run.py). So that the page can
+    # say why a scan has no changes: saved_map, compared_with (the earlier scan's
+    # id, None for the first), compared_started_at, and compared_ok (the two maps
+    # line up, so they could be compared).
+    maps = query(
+        "SELECT s.session_id, m.resolution, m.origin_x, m.origin_y FROM Session s "
+        "JOIN Drone d ON d.drone_id = s.drone_id "
+        "JOIN MapRecord m ON m.session_id = s.session_id "
+        "JOIN File f ON f.file_id = m.file_id AND f.filename = ? "
+        "WHERE d.owner_id = ? ORDER BY s.session_id",
+        (import_run.MAP_FILE, user_id),
+    )
+    frame = {m["session_id"]: (m["resolution"], m["origin_x"], m["origin_y"]) for m in maps}
+    earlier = {}
+    last = None
+    for m in maps:
+        earlier[m["session_id"]] = last
+        last = m["session_id"]
+    started = {s["session_id"]: s["started_at"] for s in scans}
+    for scan in scans:
+        before = earlier.get(scan["session_id"])
+        scan["saved_map"] = scan["session_id"] in frame
+        scan["compared_with"] = before
+        scan["compared_started_at"] = started.get(before)
+        scan["compared_ok"] = (before is not None
+                               and import_run.maps_line_up(frame[before], frame[scan["session_id"]]))
+    return scans
+
+
+@app.get("/api/sessions/{session_id}/map")
+def scan_map_picture(session_id: int, user_id: int = Depends(require_login)):
+    """The picture (PNG) of a saved scan's map, for the dashboard.
+
+    Only scans saved from a DELTA run have one (see import_run.py); the demo
+    scans don't.
+
+    Args:
+        session_id (int): the scan.
+        user_id (int): the logged-in user (from the ticket).
+
+    Returns:
+        FileResponse: the .png, never cached.
+
+    Raises:
+        HTTPException: 404 if the scan isn't theirs, has no picture, or the
+        file is gone from disk. Same answer for all three, so nobody can tell
+        which scan numbers exist by guessing.
+    """
+    rows = query(
+        "SELECT f.storage_url FROM File f "
+        "JOIN Session s ON s.session_id = f.session_id "
+        "JOIN Drone d ON d.drone_id = s.drone_id "
+        "WHERE f.session_id = ? AND d.owner_id = ? "
+        "AND f.file_type = 'map_export' AND f.mime_type = 'image/png'",
+        (session_id, user_id),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Map picture not found")
+
+    # storage_url is "saved_runs/session-N/map.png", relative to the folder the
+    # database file is in. Never serve anything that isn't inside saved_runs.
+    saved = import_run.saved_runs_dir()
+    path = (saved.parent / rows[0]["storage_url"]).resolve()
+    if saved not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="Map picture not found")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/sessions/{session_id}/changes")
@@ -280,7 +410,7 @@ def login_page():
     return FileResponse(STATIC / "login.html")
 
 @app.post("/api/login")
-def login(info: LoginInfo, response: Response):
+def login(info: LoginInfo, request: Request, response: Response):
     """POST /api/login: logs a user in.
 
     Args:
@@ -293,19 +423,22 @@ def login(info: LoginInfo, response: Response):
 
     Raises:
         HTTPException: 401 wrong email or password (one message for both),
-        429 locked after MAX_LOGIN_FAILURES wrong tries, 500 database error.
+        429 locked after too many wrong tries from this computer, 500 database error.
     """
     email = clean_email(info.email)
+    address = client_address(request)
+    forget_old_failures()
 
-    # Locked out after too many wrong tries? Checked before the password,
-    # so even the right password is refused until the lock runs out.
-    entry = FAILED_LOGINS.get(email)
-    if entry and entry["locked_until"] > time.time():
-        minutes = int((entry["locked_until"] - time.time()) // 60) + 1
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many wrong tries. Try again in {minutes} minute(s).",
-        )
+    # Locked out? Two locks are checked: this computer + this email, and this
+    # computer overall. Checked before the password, so even the right password
+    # is refused until the lock runs out.
+    for entry in (FAILED_LOGINS.get((address, email)), FAILED_BY_IP.get(address)):
+        if entry and entry["locked_until"] > time.time():
+            minutes = int((entry["locked_until"] - time.time()) // 60) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many wrong tries. Try again in {minutes} minute(s).",
+            )
 
     # Backend DB: check if email and password are a correct pair
     rows = run(
@@ -317,15 +450,12 @@ def login(info: LoginInfo, response: Response):
     # doesn't tell strangers which emails have accounts. Emails that don't
     # exist are counted too, so the lock looks the same for them.
     if not rows or not passwords.verify_password(info.password, rows[0]["password_hash"]):
-        entry = FAILED_LOGINS.setdefault(email, {"count": 0, "locked_until": 0})
-        entry["count"] += 1
-        if entry["count"] >= MAX_LOGIN_FAILURES:
-            entry["locked_until"] = time.time() + LOGIN_LOCK_MINUTES * 60
-            entry["count"] = 0
+        count_failure(FAILED_LOGINS, (address, email), MAX_LOGIN_FAILURES)
+        count_failure(FAILED_BY_IP, address, MAX_IP_FAILURES)
         raise HTTPException(status_code=401, detail="Email or password is wrong")
 
     # correct login: forget the wrong tries, then give the browser a session ticket
-    FAILED_LOGINS.pop(email, None)
+    FAILED_LOGINS.pop((address, email), None)
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = (rows[0]["user_id"], time.time() + SESSION_HOURS * 3600)
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",

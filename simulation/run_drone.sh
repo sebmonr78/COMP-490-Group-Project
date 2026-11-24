@@ -182,6 +182,15 @@ finish() {
     # Then stop this run's whole process group: conda run, the brain, and
     # the bridge it started. Only this run's.
     kill -TERM -- "-${BRAIN_PID}" 2> /dev/null || true
+
+    for _ in $(seq 1 20); do
+        kill -0 "${BRAIN_PID}" 2> /dev/null || break
+        sleep 0.5
+    done
+    if kill -0 "${BRAIN_PID}" 2> /dev/null; then
+        kill -KILL -- "-${BRAIN_PID}" 2> /dev/null || true
+    fi
+    wait "${BRAIN_PID}" 2> /dev/null || true
 }
 
 trap finish EXIT

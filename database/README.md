@@ -28,7 +28,9 @@ If you mess up the database and want a fresh one, run `python3 create_db.py --re
 - `create_db.py` - builds `delta.db` from `schema.sql`
 - `seed.py` - the fake sample data
 - `passwords.py` - hashing and checking login passwords (PBKDF2, built into Python)
+- `import_run.py` - saves a finished DELTA run as a new scan: a session, its files, the map's info, a picture of the map, and what changed since your previous scan. Standard library only. The copied files go in `saved_runs/` (not in git). Scans saved before the comparing existed can be compared afterwards with `python import_run.py compare` (add `--redo` to work them all out again, for example after changing the sizes at the top of the file). Run it from the `database` folder
 - `test_db.py` - the tests
+- `test_import_run.py` - the tests for `import_run.py`
 
 ## Tables
 
@@ -89,5 +91,6 @@ I tried to keep the SQL standard so this is easier (plain SQL, CHECK constraints
 
 ## Still to do
 
-- connect the map view to the front end
-- decide where the image and map files get saved so `storage_url` points to something real
+- save objects from a run (the simulation doesn't produce them yet, it's item 7 of its ROADMAP)
+- the changes we save now come from comparing two maps, not from the simulation noticing things. They only show where a spot went from free floor to solid or back (`object_id` is empty, and the description says something like "Something appeared here, about 0.6 x 0.4 m"). The sizes at the top of `import_run.py` (smallest change, how far the two starting spots can be apart) are first guesses and need checking against real runs
+- the RGB and depth frames still have nowhere to be saved (only map files go in `saved_runs/` so far)

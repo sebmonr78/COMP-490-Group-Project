@@ -12,6 +12,12 @@ steps for each**. Every folder has its own README with the details.
 
 ## 1. The parts
 
+For a dependency-only server installer, run `bash setup_server.sh` from the
+repository root. It checks existing versions, repairs dependencies and asks
+before rebuilding an environment. It leaves databases, accounts, scans and
+datasets alone. See [`setup/README.md`](setup/README.md) for checks, recovery
+options and the Uvicorn command to run afterwards.
+
 There are four parts, and each one is set up separately. Two of them are
 quick to set up and two take a while:
 

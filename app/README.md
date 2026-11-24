@@ -53,7 +53,7 @@ Go to http://127.0.0.1:8000 and you should see the login page. Log in with the d
 - Everybody only sees their own stuff. Drones are matched by `owner_id` and scans go through their drone. Asking for somebody else's scan gives 404 "Scan not found".
 - Passwords are hashed (PBKDF2 with a random salt, see `database/passwords.py`), never stored as plain text.
 - Forgot password: unless the email settings are on (see below), the reset link prints in the uvicorn terminal instead of being emailed. The link works once and lasts 15 minutes (`RESET_MINUTES`). It opens `/reset-password` where you pick a new password, and that also logs out any browser that was already signed in as you.
-- Wrong passwords are counted per email. After 5 wrong tries that email is locked for 5 minutes, even for the right password (`MAX_LOGIN_FAILURES` and `LOGIN_LOCK_MINUTES` in `main.py`).
+- Wrong passwords are counted per computer and email. After 5 wrong tries from one computer for one email, that computer is locked out of that email for 5 minutes, even for the right password. A computer that makes 20 wrong tries across any emails is locked completely for 5 minutes. Computers that stay quiet for 15 minutes are forgotten (`MAX_LOGIN_FAILURES`, `MAX_IP_FAILURES`, `LOGIN_LOCK_MINUTES` and `FAILURE_MEMORY_MINUTES` in `main.py`).
 
 ## Turning on reset emails
 
@@ -87,8 +87,9 @@ It should end with `OK`. The tests use a temporary database (your `delta.db` is 
 - `/dashboard` the main page (needs a login, otherwise it sends you back to `/`)
 - `/api/health` just checks the backend is up
 - `/api/drones` your drones (needs a login)
-- `/api/sessions` your scans, newest first (needs a login)
-- `/api/sessions/{id}/changes` what moved, appeared, or disappeared in that scan compared to the one before it (needs a login, 404 if it's not your scan)
+- `/api/sessions` your scans, newest first, with how many changes, maps and map pictures each has, and which earlier scan it was compared with and whether the two maps lined up (needs a login)
+- `/api/sessions/{id}/changes` what moved, appeared, or disappeared in that scan compared to the one before it (needs a login, 404 if it's not your scan). For scans saved from a DELTA run these come from comparing its map with your previous saved map when the run is saved (see `database/import_run.py`); your first saved scan is the baseline and has none
+- `/api/sessions/{id}/map` the picture of the map a saved DELTA run made (needs a login, 404 if it's not your scan or it has no picture; the demo scans have none)
 - `/api/simulations` the simulations the page can run (all the simulation endpoints need a login too)
 - `POST /api/simulations/{id}/start?where=browser|server` runs one (`delta`, `twin-flight`, `twin-play`, `open-environment`, `brain-checks`, `drone-tests`, `check-setup`)
 - `/api/simulations/run/picture?number=N` the physics twin's flight plot, for your own run
@@ -110,6 +111,7 @@ The Simulations section on the page has a Run button for each of these (the list
   - **Run in browser** shows the window on the page, and your keyboard and mouse control it. Click inside it first.
   - **Run on server** opens it on the server's own monitor instead.
   Stop shuts it down as Esc would: the brain saves its map first (it gets 45 seconds).
+  When the run ends, the website saves that map to your account as a new scan (`database/import_run.py`). It finds the map files (DELTA writes them to `memory/<scene number>/rtabmap/`, and the earlier run's `rtabmap.previous` is skipped) and copies them into `database/saved_runs/` (not in git), because the next run in the same slot wipes the folder, and draws a picture of the map. The picture shows under *What changed* when you pick that scan. The Output box says `Map saved to your account as scan N.`, or why it couldn't. It saves under whoever started the run, even if they logged out to stop it. Objects and changes aren't saved yet, because the simulation doesn't produce them yet.
 - **Physics twin: scripted flight** runs `python -m twin.fly twin/flights/hover.json` in `../physical-drone`. When it lands, the page shows the hover time, the energy used, each step, and the flight plot.
 - **Physics twin: fly it yourself** runs `python -m twin.play`. Same two buttons as DELTA.
 - **Brain checks** runs `tests/test_brain.py`: the brain's 21 checks, including that it cannot cheat.
@@ -177,11 +179,11 @@ DELTA_SIM_PYTHON=~/miniconda3/envs/habitat/bin/python uvicorn main:app --reload
 - Login added `first_name`, `last_name` and `phone_number` to the `User` table. If you made `delta.db` before that, rebuild it: `python3 create_db.py --reset --seed`.
 - `venv` isn't in git, so everybody makes their own.
 - The backend uses `database/db.py` to open the database, so keep the `database` folder next to `app`.
-- The login lockout is basic. It counts per email, so someone can lock a person out for 5 minutes by typing wrong passwords for their email. The counts only live in memory, so restarting the server clears them, and old entries are never cleaned up. That's fine for the simulation phase but it would need fixing before the app goes on the internet.
+- The login lockout is better but still basic. People on the same wifi look like one computer to the server, many different computers can still each try one email 5 times, and the counts only live in memory, so restarting the server clears them. That's fine for the simulation phase, but before the app goes on the internet the counts should be kept in the database.
 
 ## Still to do
 
-- make the login lockout stronger (also track the computer's address, keep the counts in the database, clean up old entries; the lockout tests in `test_app.py` will need updating too)
+- keep the login lockout counts in the database (not needed yet; the lockout tests in `test_app.py` would need updating too)
 - try the reset email with a real mail account (the code is ready, see Turning on reset emails)
-- have the simulation save its sessions, maps and objects to the database
-- map view and picking which scan to look at (on hold until the simulation settles)
+- save the objects and changes a DELTA run finds (its map is already saved, but the simulation doesn't produce objects or changes yet)
+- show the changes on top of the map picture
