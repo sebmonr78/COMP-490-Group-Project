@@ -9,71 +9,55 @@
 
   <style>
 
-    body { 
+    /* Colours used all over the page (change them here to restyle it) */
+    :root {
+      --accent: #2563eb;
+      --accent-dark: #1d4ed8;
+      --ink: #111827;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --page: #f3f4f6;
+      --card: #ffffff;
+    }
+
+    body {
       font-family: system-ui, sans-serif;
-      max-width: 720px;
-      margin: 2rem auto;
-      padding: 0 1rem; 
+      color: var(--ink);
+      background: var(--page);
+      line-height: 1.45;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1.5rem 1rem 3rem;
     }
 
-    h1 { 
-      margin-bottom: 0; 
+    /* The dark banner at the top: title on the left, who is logged in on the right */
+    .top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+      background: #0f172a;
+      color: #fff;
+      padding: 1rem 1.25rem;
+      border-radius: 12px;
     }
 
-    .subtitle { 
-      color: #667;
-      margin-top: 0.25rem; 
+    h1 {
+      margin: 0;
+      font-size: 1.7rem;
+      letter-spacing: 0.04em;
     }
 
-    table { 
-      width: 100%; 
-      border-collapse: collapse;
-      margin-top: 1rem; 
+    .subtitle {
+      color: var(--muted);
+      margin-top: 0.25rem;
     }
 
-    th, td { 
-      text-align: left;
-      padding: 0.6rem;
-      border-bottom: 1px solid #ddd; 
-    }
-
-    .status { 
-      padding: 2px 10px;
-      border-radius: 10px;
-      font-size: 0.85rem;
-      background: #eee;
-      color: #222; }
-
-    .status.active { 
-      background: #d4f5dc; 
-    }
-
-    .status.maintenance { 
-      background: #fff1c2; 
-    }
-
-    /* Colors for the change labels */
-    .status.moved { 
-      background: #fff1c2; 
-    }
-
-    .status.appeared { 
-      background: #d4f5dc; 
-    }
-
-    .status.disappeared { 
-      background: #fbd5d5; 
-    }
-
-    .top { 
-      display: flex; 
-      justify-content: space-between; 
-      align-items: flex-start; 
-    }
-
-    #logout-button { 
-      padding: 0.4rem 0.9rem; 
-      cursor: pointer; 
+    .top .subtitle {
+      color: #94a3b8;
+      margin: 0.15rem 0 0;
+      font-size: 0.9rem;
     }
 
     .account {
@@ -83,16 +67,96 @@
     }
 
     #whoami {
-      color: #555;
+      color: #cbd5e1;
       font-size: 0.9rem;
+    }
+
+    .top #logout-button {
+      background: transparent;
+      border-color: #475569;
+      color: #fff;
+    }
+
+    .top #logout-button:hover {
+      background: #1e293b;
+      border-color: #64748b;
+    }
+
+    /* Section headings get a blue bar on the left */
+    h2 {
+      font-size: 1.15rem;
+      margin: 2rem 0 0.25rem;
+      padding-left: 0.6rem;
+      border-left: 4px solid var(--accent);
+    }
+
+    /* Tables look like white cards */
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      margin-top: 0.75rem;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    }
+
+    th, td {
+      text-align: left;
+      padding: 0.65rem 0.8rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      background: #f9fafb;
+    }
+
+    th:first-child { border-top-left-radius: 9px; }
+    th:last-child { border-top-right-radius: 9px; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #f9fafb; }
+
+    .status {
+      padding: 2px 10px;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      background: #eee;
+      color: #222;
+    }
+
+    .status.active {
+      background: #d4f5dc;
+    }
+
+    .status.maintenance {
+      background: #fff1c2;
+    }
+
+    /* Colors for the change labels */
+    .status.moved {
+      background: #fff1c2;
+    }
+
+    .status.appeared {
+      background: #d4f5dc;
+    }
+
+    .status.disappeared {
+      background: #fbd5d5;
     }
 
     /* Soft grey note for empty or loading messages (hides itself when empty) */
     .note {
-      color: #667;
-      background: #f6f7f9;
-      border: 1px dashed #ccd;
-      border-radius: 8px;
+      color: var(--muted);
+      background: var(--card);
+      border: 1px dashed #cbd5e1;
+      border-radius: 10px;
       padding: 0.8rem 1rem;
       margin-top: 0.75rem;
     }
@@ -103,7 +167,7 @@
 
     /* Summary line and filter buttons above the changes table */
     .summary {
-      margin: 0.25rem 0 0;
+      margin: 0.5rem 0 0;
       font-weight: 600;
     }
 
@@ -132,14 +196,15 @@
       display: block;
       max-width: 100%;
       height: auto;
-      border: 1px solid #c9ccd3;
-      border-radius: 4px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
     }
 
     #map-block figcaption {
       margin-top: 0.3rem;
       font-size: 0.85rem;
-      color: #555;
+      color: var(--muted);
     }
 
     /* The scan picker above the changes table */
@@ -150,9 +215,51 @@
 
     #scan-picker {
       font: inherit;
-      padding: 0.3rem 0.5rem;
+      padding: 0.35rem 0.5rem;
       margin-left: 0.4rem;
       max-width: 100%;
+      background: var(--card);
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+    }
+
+    /* Buttons: blue, with a white "secondary" kind */
+    button {
+      padding: 0.4rem 0.95rem;
+      font: inherit;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--accent-dark);
+      border-color: var(--accent-dark);
+    }
+
+    button.secondary {
+      background: var(--card);
+      color: var(--ink);
+      border-color: #d1d5db;
+    }
+
+    button.secondary:hover:not(:disabled) {
+      background: #f3f4f6;
+      border-color: #9ca3af;
+    }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    /* A visible outline when you move around with the keyboard */
+    button:focus-visible, select:focus-visible, a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
 
     /* Simulations */
@@ -160,21 +267,18 @@
     .status.finished { background: #d4f5dc; }
     .status.failed { background: #fbd5d5; }
     .status.stopped { background: #eee; }
-    button { padding: 0.35rem 0.9rem; font: inherit; border: 1px solid #222; border-radius: 6px; background: #222; color: #fff; cursor: pointer; }
-    button.secondary { background: #fff; color: #222; }
-    button:disabled { opacity: 0.4; cursor: default; }
-    .sim-description { color: #666; font-size: 0.85rem; margin-top: 0.2rem; }
+    .sim-description { color: var(--muted); font-size: 0.85rem; margin-top: 0.2rem; }
     #sim-run-header { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; }
     .sim-buttons { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
     .sim-note { color: #a15c00; font-size: 0.8rem; margin-top: 0.3rem; }
     /* The simulation window is 1600 x 800, so let its viewer use more of the
        screen than the rest of the page does */
     #sim-viewer { width: min(1600px, calc(100vw - 2rem)); position: relative; left: 50%; transform: translateX(-50%); margin-top: 0.75rem; }
-    #sim-viewer iframe { display: block; width: 100%; aspect-ratio: 2 / 1; border: 1px solid #222; border-radius: 6px; background: #000; }
-    #sim-viewer-help { color: #666; font-size: 0.85rem; margin: 0.4rem 0 0; }
+    #sim-viewer iframe { display: block; width: 100%; aspect-ratio: 2 / 1; border: 1px solid #222; border-radius: 10px; background: #000; }
+    #sim-viewer-help { color: var(--muted); font-size: 0.85rem; margin: 0.4rem 0 0; }
     #sim-results { margin-top: 0.75rem; }
-    #sim-results img { display: block; max-width: 100%; margin-top: 0.75rem; border: 1px solid #ddd; border-radius: 6px; }
-    #sim-output { background: #111; color: #ddd; font-size: 0.8rem; padding: 0.75rem; border-radius: 6px; height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin-top: 0.5rem; }
+    #sim-results img { display: block; max-width: 100%; margin-top: 0.75rem; border: 1px solid var(--line); border-radius: 10px; }
+    #sim-output { background: #0f172a; color: #e2e8f0; font-size: 0.8rem; padding: 0.75rem; border-radius: 10px; height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; margin-top: 0.5rem; }
   </style>
 </head>
 
